@@ -84,6 +84,7 @@ mod tests {
     #[test]
     fn local_calendar_rejects_invalid_dates_and_reversed_ranges(){
         let mut draft=Draft::new(NaiveDate::from_ymd_opt(2026,11,3).unwrap());
+        draft.end_date="2026-11-03".into();
         assert!(draft.entry().is_err());draft.title="散步".into();
         draft.start_date="2026-02-29".into();assert!(draft.entry().is_err());
         draft.start_date="2026-11-03".into();draft.start_time="25:00".into();assert!(draft.entry().is_err());
@@ -93,6 +94,7 @@ mod tests {
     #[test]
     fn local_calendar_all_day_end_is_exclusive_and_reminds_at_nine(){
         let mut draft=Draft::new(NaiveDate::from_ymd_opt(2026,11,3).unwrap());draft.title="休假".into();draft.all_day=true;
+        draft.start_date="2026-11-03".into();draft.end_date=draft.start_date.clone();
         let entry=draft.entry().unwrap();assert_eq!(entry.event.end.unwrap()-entry.event.start,86400);
         assert_eq!(entry.reminder_at().unwrap()-entry.event.start,9*3600);
         let edited=Draft::edit(&entry).entry().unwrap();assert_eq!(entry.event.end,edited.event.end);

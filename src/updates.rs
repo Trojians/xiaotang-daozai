@@ -5,6 +5,7 @@ use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, 
 const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
 const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
 const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
+const BACKUP_DOWNLOAD: &str = "https://hcnounojrizu.feishu.cn/wiki/MpfXwFGf8ijhitkfuxdcELdBnqg";
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -185,7 +186,7 @@ impl State {
                         if self.cancel.is_some() {
                             ui.add(egui::ProgressBar::new(self.progress).fill(theme::BLUE).desired_height(8.0));
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(if self.progress<1.0{format!("正在下载更新 · {:.0}%",self.progress*100.0)}else{"正在校验安装包…".into()}).color(theme::GRAY));
+                                ui.label(egui::RichText::new(if self.progress==0.0{"正在连接下载服务器…".into()}else if self.progress<1.0{format!("正在下载更新 · {:.0}%",self.progress*100.0)}else{"正在校验安装包…".into()}).color(theme::GRAY));
                                 if ui.button("取消下载").clicked() { self.cancel.as_ref().unwrap().store(true,Ordering::Relaxed); }
                             });
                         } else {
@@ -205,14 +206,16 @@ impl State {
                                     });
                                 }
                             });
-                            ui.add_space(2.0);
-                            ui.horizontal(|ui| {
-                                ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
-                                ui.label(egui::RichText::new("·").color(theme::DIM));
-                                ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
-                            });
-                            if release.package.is_none() { ui.label(egui::RichText::new("此版本请通过浏览器下载。").size(11.5).color(theme::DIM)); }
                         }
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.hyperlink_to(egui::RichText::new("飞书备用下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
+                            ui.label(egui::RichText::new("·").color(theme::DIM));
+                            ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
+                            ui.label(egui::RichText::new("·").color(theme::DIM));
+                            ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
+                        });
+                        if release.package.is_none() { ui.label(egui::RichText::new("此版本请通过浏览器下载。").size(11.5).color(theme::DIM)); }
                     });
                     if self.rx.is_some() { ctx.request_repaint_after(Duration::from_millis(100)); }
                 });
@@ -253,13 +256,30 @@ unsafe fn update_window_region(rect: egui::Rect, scale: f32) -> windows::Win32::
     )
 }
 
+fn update_agent(proxy: Option<&str>, timeout: Duration) -> Result<ureq::Agent, String> {
+    // 整体 timeout 会覆盖读取超时，分别限制连接和无数据等待。
+    let mut builder = ureq::AgentBuilder::new().try_proxy_from_env(false)
+        .timeout_connect(Duration::from_secs(20)).timeout_read(timeout).timeout_write(timeout);
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(ureq::Proxy::new(proxy).map_err(|_| "代理地址无效，请检查代理设置后重试")?);
+    }
+    Ok(builder.build())
+}
+
+fn http_agent() -> Result<ureq::Agent, String> {
+    let proxy = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]
+        .iter().find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
+        .or_else(crate::quota::system_proxy);
+    update_agent(proxy.as_deref(), Duration::from_secs(15))
+}
+
 fn check() -> Result<Option<Release>, String> {
-    let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build()
+    let response = http_agent()?
         .get(API).set("User-Agent", concat!("Daozai/", env!("CARGO_PKG_VERSION")))
         .set("Accept", "application/vnd.github+json").call().map_err(|error| match error {
             ureq::Error::Status(403 | 429, _) => "检查过于频繁，请稍后重试".to_owned(),
             ureq::Error::Status(404, _) => "暂未找到正式版本，请查看发布页".to_owned(),
-            _ => "无法连接更新服务，请检查网络后重试".to_owned(),
+            _ => "无法连接更新服务，请检查网络或代理后重试".to_owned(),
         })?;
     let value: serde_json::Value = serde_json::from_reader(response.into_reader())
         .map_err(|_| "更新信息格式异常，请稍后重试".to_owned())?;
@@ -288,8 +308,8 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) ->
     let work = root.join(format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
-        let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(600)).timeout_read(Duration::from_secs(15)).build()
-            .get(&package.url).call().map_err(|_| "下载失败，请检查网络后重试")?;
+        let response = http_agent()?
+            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载")?;
         if !response.get_url().starts_with("https://") { return Err("更新下载未使用安全连接".into()); }
         let mut input = response.into_reader();
         let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
@@ -309,7 +329,7 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断，请重试")?;
+        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用飞书备用下载")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -368,6 +388,55 @@ fn parse_release(value: &serde_json::Value, current: &str) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn update_requests_use_configured_proxy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    let mut request = [0; 4096];
+                    let n = stream.read(&mut request).unwrap();
+                    assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET http://127.0.0.1:1/update.zip"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                    return;
+                }
+                if start.elapsed() > Duration::from_secs(3) { return; }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let result = update_agent(Some(&proxy), Duration::from_millis(200)).unwrap()
+            .get("http://127.0.0.1:1/update.zip").call();
+        worker.join().unwrap();
+        assert_eq!(result.unwrap().into_string().unwrap(), "ok");
+    }
+
+    #[test]
+    fn stalled_update_response_times_out() {
+        for (scheme, body) in [("http", false), ("https", false), ("http", true)] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("{scheme}://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            if body {
+                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                stream.read(&mut [0; 4096]).unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(1200));
+        });
+        let start = std::time::Instant::now();
+        let result = update_agent(None, Duration::from_millis(100)).unwrap().get(&url).call();
+        if body { assert!(result.unwrap().into_string().is_err()); }
+        else { assert!(result.is_err()); }
+        let elapsed = start.elapsed();
+        worker.join().unwrap();
+        assert!(elapsed < Duration::from_secs(1), "等待响应超时未生效：{elapsed:?}");
+        }
+    }
     fn release(tag: &str) -> serde_json::Value {
         serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false})
     }
@@ -488,8 +557,8 @@ mod tests {
         std::env::set_var("DAOZAI_DATA_DIR", dest.join("data"));
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
-        app.updates.result = Some(Ok(Some(Release { version: "v0.6.40".into(),
-            notes: "新增应用内下载更新\n优化桌面交互体验".into(), page: RELEASES.into(),
+        app.updates.result = Some(Ok(Some(Release { version: "v0.6.50".into(),
+            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增飞书备用下载入口".into(), page: RELEASES.into(),
             package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
@@ -509,6 +578,15 @@ mod tests {
             *capture.lock().unwrap() = Some(ctx.run(raw, |ctx| (viewport.viewport_ui_cb)(ctx)));
         });
         let mut raster = crate::preview_raster::Raster::new(520, 416);
+        for (name, progress, message) in [
+            ("update-dialog", None, ""),
+            ("update-connecting", Some(0.0), ""),
+            ("update-downloading", Some(0.42), ""),
+            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载"),
+        ] {
+        app.updates.cancel = progress.map(|_| Arc::new(AtomicBool::new(false)));
+        app.updates.progress = progress.unwrap_or_default();
+        app.updates.message = message.into();
         for frame in 0..5 {
             let root = ctx.run(Default::default(), |ctx| app.settings_ui(ctx, false));
             raster.update_textures(&root.textures_delta);
@@ -519,10 +597,11 @@ mod tests {
                 raster.draw(&ctx.tessellate(child.shapes, child.pixels_per_point), child.pixels_per_point);
                 let mut rgba = Vec::new();
                 raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join("update-dialog.png"), &rgba, 520, 416, image::ColorType::Rgba8).unwrap();
+                image::save_buffer(dest.join(format!("{name}.png")), &rgba, 520, 416, image::ColorType::Rgba8).unwrap();
             }
             raster.free_textures(&root.textures_delta);
             raster.free_textures(&child.textures_delta);
+        }
         }
         if let Some(old) = old { std::env::set_var("DAOZAI_DATA_DIR", old); }
         else { std::env::remove_var("DAOZAI_DATA_DIR"); }

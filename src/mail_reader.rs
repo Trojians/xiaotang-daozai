@@ -4,7 +4,10 @@ use eframe::egui::{self,Color32};
 
 impl App {
     pub fn mail_reader_ui(&mut self,ctx:&egui::Context) {
-        let Some(item)=self.mail.reading.as_ref() else{return};
+        let Some(raw)=self.mail.reading.clone() else{return};
+        let hidden=self.mail_code_hidden(&raw);
+        let item=self.display_mail(&raw);
+        let mut reveal=false;
         let focus=std::mem::take(&mut self.mail.reader_focus);
         let (mut close,mut link)=(false,None);
         let mut toggle=None;
@@ -12,6 +15,7 @@ impl App {
             egui::ViewportBuilder::default().with_title("邮件全文 · 岛仔").with_inner_size([700.0,620.0]).with_min_inner_size([500.0,380.0]),|ctx,_|{
             if focus{ctx.send_viewport_cmd(egui::ViewportCommand::Focus);}
             close=ctx.input(|i|i.viewport().close_requested());
+            if raw.code.is_some(){ctx.request_repaint_after(std::time::Duration::from_secs(1));}
             egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(25,25,27)).inner_margin(22)).show(ctx,|ui|{
                 ui.spacing_mut().item_spacing.y=8.0;
                 ui.add(egui::Label::new(egui::RichText::new(&item.subject).size(20.0).strong().color(Color32::WHITE)).wrap());
@@ -27,11 +31,15 @@ impl App {
                         if ui.button(if self.mail_event_ignored(event){"恢复日程"}else{"忽略日程"}).clicked(){toggle=Some(event.clone());}
                     });
                 }
+                if hidden {
+                    ui.label("验证码已隐藏，不代表验证码失效；相关链接也暂时隐藏。");
+                    reveal=ui.button("主动查看验证码与正文 15 秒").clicked();
+                }
                 ui.separator();
                 ui.label(egui::RichText::new("鼠标滚轮或拖动右侧滚动条查看全文").size(11.5).color(Color32::from_gray(160)));
                 ui.style_mut().spacing.scroll.floating=false;
                 egui::ScrollArea::vertical().id_salt(("mail-reader-body",&item.account,item.uid)).auto_shrink([false,false]).show(ui,|ui|{
-                    ui.add(egui::Label::new(egui::RichText::new(if item.summary.is_empty(){"（这封邮件没有正文）"}else{&item.summary}).size(14.0).color(Color32::from_gray(235))).selectable(true).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(if item.summary.is_empty(){"（这封邮件没有正文）"}else{item.summary.as_ref()}).size(14.0).color(Color32::from_gray(235))).selectable(true).wrap());
                     if !item.links.is_empty(){
                         ui.add_space(12.0);ui.separator();ui.label(egui::RichText::new("邮件中的链接").strong());
                         for target in &item.links{
@@ -41,6 +49,7 @@ impl App {
                 });
             });
         });
+        if reveal{self.reveal_mail_code(&raw);ctx.request_repaint();}
         if let Some(event)=toggle{self.toggle_mail_event(&event);}
         if close{self.mail.reading=None;}
         if let Some(url)=link{self.pending.push(Cmd::OpenUrl(url));ctx.request_repaint();}

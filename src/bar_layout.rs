@@ -64,6 +64,13 @@ impl Layout {
         for value in x.iter_mut().flatten() {*value-=width/2.0;}
         Self {width:width.max(96.0),x}
     }
+    pub fn widen_clock(&mut self, extra:f32) {
+        let clock=self.x[CLOCK].unwrap();
+        for (slot,x) in self.x.iter_mut().enumerate() {
+            if slot!=CLOCK { if let Some(x)=x { *x+=if *x<clock {-extra/2.0}else{extra/2.0}; } }
+        }
+        self.width+=extra;
+    }
     pub fn reorder(&mut self,order:&[usize]) {
         if !valid_order(order){return;}
         let original=self.x;let mut cursor=-self.width/2.0+16.0;
@@ -121,6 +128,23 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clock_12h_keeps_components_separate_in_custom_orders(){
+        for order in [DEFAULT_ORDER,[FOCUS,MUSIC,QUOTA,CLOCK,PET,BATTERY]] {
+            for quotas in 0..=5 {
+                let mut layout=Layout::new(true,quotas,true,true,false,true);
+                layout.reorder(&order);layout.widen_clock(40.0);
+                let mut boxes:Vec<_>=layout.x.iter().enumerate().filter_map(|(i,x)|x.map(|x|{
+                    let width=WIDTHS[i]+if i==CLOCK {40.0}else{0.0};
+                    (x-width/2.0,x+width/2.0)
+                })).collect();
+                boxes.sort_by(|a,b|a.0.total_cmp(&b.0));
+                assert!(boxes.windows(2).all(|p|p[1].0-p[0].1>=6.9));
+                assert!(boxes.first().unwrap().0>=-layout.width/2.0+15.9);
+                assert!(boxes.last().unwrap().1<=layout.width/2.0-15.9);
+            }
+        }
+    }
     #[test]
     fn custom_order_preserves_groups_and_hidden_positions(){
         assert!(!valid_order(&[0,0,2,6,7,9]));

@@ -20,8 +20,14 @@ fn header<'a>(raw:&'a str,key:&str)->Option<&'a str>{
 }
 
 fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
+    let mut lyrics=parse_krc(raw);
+    if !lyrics.synced{return None;}
     // 文件名已经严格匹配完整歌手与歌名；头部可能为空，合唱也可能只标主歌手。
-    if header(raw,"ti").filter(|s|!s.is_empty()).is_some_and(|s|normalized(s)!=normalized(title)){return None;}
+    if header(raw,"ti").filter(|s|!s.is_empty()).is_some_and(|s|normalized(s)!=normalized(title)) {
+        // 酷狗头部可能保留旧别名；仅在正文开头的完整歌名和歌手也吻合时接受。
+        let credit=normalized(&format!("{title} - {artist}"));
+        if !lyrics.lines.first().is_some_and(|line|line.t<=1.0 && normalized(&line.text)==credit){return None;}
+    }
     if let Some(singer)=header(raw,"ar").filter(|s|!s.is_empty()) {
         let singer=normalized(singer);
         if singer!=normalized(artist) && !artist.split(['、','/','&',',','，',';','；']).any(|part|normalized(part)==singer){return None;}
@@ -31,8 +37,6 @@ fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
             if total>0 && (total as f64/1000.0-duration).abs()>2.0{return None;}
         }
     }
-    let mut lyrics=parse_krc(raw);
-    if !lyrics.synced{return None;}
     // 文件自身的校准量属于原生时间轴，用户的提前量仍由界面单独应用。
     let offset=header(raw,"offset").and_then(|s|s.parse::<i32>().ok()).unwrap_or_default() as f32/1000.0;
     for line in &mut lyrics.lines{line.t=(line.t+offset).max(0.0);}
@@ -93,6 +97,32 @@ mod tests{
         use std::io::Write;
         let mut encoder=flate2::write::ZlibEncoder::new(Vec::new(),flate2::Compression::default());encoder.write_all(raw.as_bytes()).unwrap();
         let mut bytes=b"krc1".to_vec();bytes.extend(encoder.finish().unwrap().iter().enumerate().map(|(i,b)|b^KEY[i%16]));bytes
+    }
+    #[test]
+    fn alias_header_requires_exact_filename_and_opening_credit(){
+        let dir=std::env::temp_dir().join(format!("daozai-krc-alias-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("歌手 - 测试歌 (副标题)-0123456789abcdef0123456789abcdef.krc");
+        let raw="[ti:测试歌 (女生版)]\n[ar:歌手]\n[total:232000]\n[0,70]<0,35,0>测试歌 (副标题)<35,35,0> - 歌手\n[4000,2000]<0,2000,0>第一句";
+        fs::write(&path,fixture(raw)).unwrap();
+        assert!(read_directory(&dir,"测试歌 (副标题)","歌手",232.0).is_some(),"文件名和开头署名完全一致时，应接受头部别名");
+        assert!(read_directory(&dir,"测试歌 (Live)","歌手",232.0).is_none());
+        assert!(read_directory(&dir,"测试歌 (副标题)","其他歌手",232.0).is_none());
+        assert!(read_directory(&dir,"测试歌 (副标题)","歌手",260.0).is_none());
+        for wrong in [raw.replace("<0,35,0>测试歌 (副标题)","<0,35,0>测试歌 (Live)"),raw.replace(" - 歌手"," - 其他歌手")] {
+            fs::write(&path,fixture(&wrong)).unwrap();
+            assert!(read_directory(&dir,"测试歌 (副标题)","歌手",232.0).is_none());
+        }
+        fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    #[ignore="验证本机原歌曲的真实 KRC 别名与原生时间轴"]
+    fn live_kugou_alias_lyrics(){
+        let lyrics=read("想你就写信 (你说想哭就弹琴)","cici_",232.0).expect("必须读取本机原生歌词");
+        assert!(lyrics.synced && lyrics.lines.len()>20);
+        for time in [5.0,10.0,15.0] {
+            let line=&lyrics.lines[lyrics.index_at(time).unwrap()];
+            assert!(!line.text.is_empty());println!("{time}秒：{}（原生时间 {}）",line.text,line.t);
+        }
     }
     #[test]
     fn hexadecimal_cache_suffix_is_not_part_of_the_song_title(){

@@ -65,11 +65,11 @@ Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI
 
 ## 安装与更新
 
-1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.49-x64.exe`。
+1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.50-x64.exe`。
 2. 双击安装器，可修改安装位置、选择是否创建桌面快捷方式和开机自启，再点击「一键安装」。桌面快捷方式默认勾选，首次安装默认不开机自启；无需解压。
 3. 安装完成后打开「岛仔」，也可从桌面快捷方式启动。在托盘菜单打开设置，选择需要的功能。
 
-需要免安装使用时，下载 `Daozai-v0.6.49-windows-x64.zip` 并完整解压，运行其中的 `daozai.exe`。程序仍默认使用当前用户的应用数据目录。
+需要免安装使用时，下载 `Daozai-v0.6.50-windows-x64.zip` 并完整解压，运行其中的 `daozai.exe`。程序仍默认使用当前用户的应用数据目录。
 
 在「设置 → 关于」点击「检查更新」，可查看最新正式版及更新说明，选择「下载并安装」「浏览器下载」或「稍后」。应用内下载通过校验后会重启更新；也可在发布页下载后再次安装，原设置和记录会保留。卸载可通过 Windows「已安装的应用」完成；卸载同样保留用户数据。详细操作见 [使用指南](docs/USAGE.md)。
 

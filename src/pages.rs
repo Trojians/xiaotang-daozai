@@ -67,24 +67,27 @@ impl App {
             if with_lyrics {self.draw_music_lyrics(c);}
         }
 
-        let frac=if np.duration>0.0 {(np.position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let tc=if has {theme::WHITE}else{Color32::from_rgb(78,78,82)};
         let (bx,bw,by)=if with_lyrics {(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
-        let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
-        c.text(44.0,time_y,&mmss(np.position),time_size,W::Regular,tc,H::Left);
-        c.text(right,time_y,&format!("-{}",mmss((np.duration-np.position).max(0.0))),time_size,W::Regular,tc,H::Right);
         let bar=c.hit_drag(bx-4.0,by-7.0,bw+8.0,14.0,"m-seek");
+        let seek_position=if has && np.duration>0.0 && (bar.is_pointer_button_down_on() || bar.clicked() || bar.drag_stopped()) {
+            bar.interact_pointer_pos().or_else(||ctx.input(|i|i.pointer.interact_pos()))
+                .map(|pointer|((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64*np.duration)
+        }else{None};
+        let position=seek_position.unwrap_or(np.position);
+        let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
+        let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
+        c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
+        let remaining=if has && np.duration<=0.0{"--:--".into()}else{format!("-{}",mmss((np.duration-position).max(0.0)))};
+        c.text(right,time_y,&remaining,time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);
         let bh=if has {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
         c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
         if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
         if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
-        if (bar.clicked() || bar.drag_stopped()) && has && np.duration>0.0 {
-            if let Some(pointer)=bar.interact_pointer_pos() {
-                let fraction=((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64;
-                cmds.push(Cmd::Media(Transport::Seek(fraction*np.duration)));
-            }
+        if bar.clicked() || bar.drag_stopped() {
+            if let Some(position)=seek_position {cmds.push(Cmd::Media(Transport::Seek(position)));}
         }
 
         let y=118.0;
@@ -654,8 +657,15 @@ impl App {
     }
 
     // ---------------------------------------------------------------
-    // 邮件（v0.5.5）：左侧验证码 / 连接状态，右侧最近三封。
+    // 邮件：有验证码大卡时分栏，否则显示紧凑单行列表。
     // ---------------------------------------------------------------
+    fn visible_mail_code(&self)->Option<&mail::Item> {
+        self.mail.code_item().filter(|item|self.settings.mail_code && !self.mail_code_hidden(item))
+    }
+    pub(crate) fn mail_list_bounds(&self)->Rect {
+        let left=if self.visible_mail_code().is_some(){182.0}else{36.0};
+        Rect::from_min_max(Pos2::new(left,36.0),Pos2::new(380.0,122.0))
+    }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         if self.mail.accounts.is_empty() {
             c.text(42.0, 60.0, "还没有邮箱", 13.0, W::Bold, theme::WHITE, H::Left);
@@ -685,55 +695,60 @@ impl App {
                 None => self.mail.open_uid = None,
             }
         }
-        c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
-        let code=self.mail.code_item().filter(|_|self.settings.mail_code).cloned();
-        if let Some(item)=&code {
-            let value=item.code.as_deref().unwrap_or_default();
+        let code=self.visible_mail_code().cloned();
+        if let Some(raw)=&code {
+            c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
+            let hidden=self.mail_code_hidden(raw);
+            let item=self.display_mail(raw);
+            let value=item.code.as_deref().unwrap_or("••••••");
             c.text(46.0,51.0,"验证码",10.5,W::Regular,theme::GRAY,H::Left);
             c.text(166.0,51.0,&c.fit(&item.from,10.5,W::Semibold,78.0),10.5,W::Semibold,theme::WHITE,H::Right);
             c.text(46.0,75.0,value,23.0,W::Bold,theme::GREEN,H::Left);
             c.text(46.0,91.0,&c.fit(&item.subject,10.5,W::Regular,120.0),10.5,W::Regular,Color32::from_gray(190),H::Left);
-            c.text(46.0,108.0,"点击复制",10.5,W::Regular,theme::DIM,H::Left);
+            c.text(46.0,108.0,if hidden{"已隐藏 · 点击查看"}else{"点击复制"},10.5,W::Regular,theme::DIM,H::Left);
             c.text(166.0,108.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);
             c.hit(42.0,38.0,128.0,16.0,"mail-code-source").on_hover_text(format!("来自：{}\n{}\n收件邮箱：{}\n{}",item.from,item.subject,item.account,item.time));
-            if c.hit(40.0,56.0,132.0,38.0,("mail-code",item.uid)).on_hover_text(format!("复制 {} 的验证码",item.from)).clicked(){cmds.push(Cmd::Copy(value.to_string()));self.code_copied(value);}
-        } else {
-            c.text(46.0,51.0,"邮件提醒",10.5,W::Regular,theme::GRAY,H::Left);
-            let w=c.text(46.0,75.0,&self.mail.recent.len().to_string(),21.0,W::Bold,theme::WHITE,H::Left);
-            c.text(48.0+w,75.0,"封",10.5,W::Regular,theme::GRAY,H::Left);
-            c.text(46.0,91.0,"最近收到",10.5,W::Regular,theme::GRAY,H::Left);
-            let ready=self.mail.accounts.iter().filter(|a|self.mail.status_of(&a.email).ok()).count();
-            let total=self.mail.accounts.len();
-            let status=if total==1 {
-                if !self.mail.accounts[0].enabled {"邮箱已暂停".into()}
-                else{match self.mail.status_of(&self.mail.accounts[0].email){
-                    mail::Status::Ready=>"邮箱已连接".into(),mail::Status::Connecting=>"正在连接…".into(),
-                    mail::Status::Auth(_)=>"需要授权码".into(),mail::Status::Failed(_)=>"连接失败".into(),mail::Status::Idle=>"等待连接".into(),
-                }}
-            }else if ready==total{format!("{total} 个邮箱已连接")}else if ready==0{"邮箱未连接".into()}else{"部分邮箱未连接".into()};
-            let color=if ready==total&&self.mail.accounts.iter().all(|a|a.enabled){theme::GREEN}else{theme::GRAY};
-            c.text(46.0,108.0,&c.fit(&status,10.5,W::Regular,120.0),10.5,W::Regular,color,H::Left);
+            if c.hit(40.0,56.0,132.0,38.0,("mail-code",item.uid)).on_hover_text(format!("复制 {} 的验证码",item.from)).clicked(){if hidden{self.reveal_mail_code(raw);}else{cmds.push(Cmd::Copy(value.to_string()));self.code_copied(value);}}
         }
-        if self.mail.recent.is_empty(){c.text(186.0,66.0,"还没有收到邮件",11.0,W::Regular,theme::GRAY,H::Left);return;}
+        let list_bounds=self.mail_list_bounds();
+        let list_x=list_bounds.left();
+        let list_w=list_bounds.width();
+        let row_w=list_w-12.0;
+        let compact=code.is_none();
+        let row_h=if compact {21.5}else{34.0};
+        if self.mail.recent.is_empty(){c.text(list_x+6.0,66.0,"还没有收到邮件",11.0,W::Regular,theme::GRAY,H::Left);return;}
         let mut content=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("mail-list",c.live)),
-            egui::UiBuilder::new().max_rect(c.rect(182.0,36.0,198.0,86.0)).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
-        content.set_clip_rect(c.rect(182.0,36.0,198.0,86.0).intersect(c.painter.clip_rect()));
+            egui::UiBuilder::new().max_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height())).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
+        content.set_clip_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height()).intersect(c.painter.clip_rect()));
         content.set_opacity(c.painter.opacity());if !c.live{content.disable();}
         content.spacing_mut().item_spacing.y=0.0;
         content.spacing_mut().scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         content.visuals_mut().widgets.inactive.bg_fill=Color32::from_gray(80);
-        egui::ScrollArea::vertical().id_salt("mail-list-scroll").max_height(86.0*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,34.0*c.s,self.mail.recent.len(),|ui,range|{
-            for item in &self.mail.recent[range] {
-                let (rect,_)=ui.allocate_exact_size(egui::vec2(186.0*c.s,34.0*c.s),egui::Sense::hover());
+        egui::ScrollArea::vertical().id_salt("mail-list-scroll").max_height(list_bounds.height()*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,row_h*c.s,self.mail.recent.len(),|ui,range|{
+            let rows:Vec<_>=self.mail.recent[range].iter().map(|item|(self.mail_code_hidden(item),self.display_mail(item))).collect();
+            for (hidden,item) in &rows {
+                let (rect,_)=ui.allocate_exact_size(egui::vec2(row_w*c.s,row_h*c.s),egui::Sense::hover());
                 let mut row=Card::new(ui,rect.min,ui.clip_rect());row.s=c.s;row.live=c.live;
-                let hit=row.hit(0.0,0.0,186.0,33.0,("mail-row",item.uid,item.account.as_str()));
+                let hit=row.hit(0.0,0.0,row_w,row_h-1.0,("mail-row",item.uid,item.account.as_str()));
                 let selected=code.as_ref().is_some_and(|m|m.uid==item.uid&&m.account.eq_ignore_ascii_case(&item.account));
-                if hit.hovered()||selected{row.fill(0.0,0.0,186.0,32.0,6.0,Color32::from_gray(if hit.hovered(){27}else{17}));}
+                if hit.hovered()||selected{row.fill(0.0,0.0,row_w,row_h-2.0,6.0,Color32::from_gray(if hit.hovered(){27}else{17}));}
                 if selected{row.fill(0.0,6.0,2.0,20.0,1.0,theme::GREEN);}
-                row.text(6.0,12.0,&row.fit(&item.from,11.5,W::Semibold,132.0),11.5,W::Semibold,theme::WHITE,H::Left);
-                row.text(180.0,12.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
-                row.text(6.0,27.0,&row.fit(&item.subject,10.5,W::Regular,174.0),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                if compact {
+                    row.text(6.0,14.0,&row.fit(&item.from,11.0,W::Semibold,62.0),11.0,W::Semibold,theme::WHITE,H::Left);
+                    let subject_w=row_w-118.0-if *hidden {34.0}else{0.0};
+                    let width=row.text(74.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                    if *hidden {
+                        row.fill(78.0+width,5.0,30.0,12.0,3.0,theme::BTN);
+                        row.text(93.0+width,14.0,"已隐藏",8.5,W::Regular,theme::GRAY,H::Center);
+                    }
+                    row.text(row_w-6.0,14.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
+                    row.seg((6.0,row_h-0.5),(row_w-6.0,row_h-0.5),0.5,Color32::from_gray(40));
+                } else {
+                row.text(6.0,12.0,&row.fit(&item.from,11.5,W::Semibold,row_w-54.0),11.5,W::Semibold,theme::WHITE,H::Left);
+                row.text(row_w-6.0,12.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
+                row.text(6.0,27.0,&row.fit(&item.subject,10.5,W::Regular,row_w-12.0),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                }
                 hit.clone().on_hover_text(format!("{}\n{}\n收件邮箱：{}\n{}",item.from,item.subject,item.account,item.time));
                 if hit.clicked(){self.mail.open_uid=Some((item.account.clone(),item.uid));}
             }
@@ -741,7 +756,9 @@ impl App {
     }
 
     /// 岛内邮件详情可滚动，也可以进入独立窗口阅读全文。
-    pub(crate) fn mail_detail(&mut self, c: &Card, item: &mail::Item, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
+        let hidden=self.mail_code_hidden(raw);
+        let display=self.display_mail(raw);let item=&display;
         c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
         let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
@@ -754,7 +771,7 @@ impl App {
         c.text(46.0, 50.0, &from, 11.5, W::Semibold, theme::WHITE, H::Left);
         let read=c.hit(266.0,42.0,60.0,14.0,("mail-read",&item.account,item.uid)).on_hover_text("在独立窗口阅读完整正文");
         c.text(324.0,50.0,"阅读全文",10.5,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
-        if read.clicked(){self.mail.reading=Some(item.clone());self.mail.reader_focus=true;}
+        if read.clicked(){self.mail.reading=Some(raw.clone());self.mail.reader_focus=true;}
         let subject = c.fit(&item.subject, 13.5, W::Semibold, 328.0);
         c.text(46.0, 73.0, &subject, 13.5, W::Semibold, theme::WHITE, H::Left);
         c.hit(46.0,58.0,328.0,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
@@ -774,7 +791,7 @@ impl App {
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
             if !item.summary.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(&item.summary).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }
@@ -789,7 +806,11 @@ impl App {
         // 底部一行：会议时间（绿）优先，其次验证码（点一下复制）。
         c.seg((46.0,199.0),(374.0,199.0),0.6,Color32::from_gray(48));
         let y = 214.0;
-        if let Some(m) = &item.meeting {
+        if hidden {
+            c.text(46.0,y,"验证码已隐藏（不代表失效）",11.0,W::Regular,theme::GRAY,H::Left);
+            c.text(374.0,y,"查看 15 秒",10.5,W::Regular,theme::BLUE,H::Right);
+            if c.hit(290.0,y-14.0,86.0,24.0,("mail-reveal",item.uid)).clicked(){self.reveal_mail_code(raw);}
+        } else if let Some(m) = &item.meeting {
             let ignored=self.mail_event_ignored(m);
             c.text(46.0,y,&format!("{} · {}",if ignored{"已忽略"}else{"日程"},m.at),10.5,W::Regular,if ignored{theme::DIM}else{theme::GREEN},H::Left);
             let label=if ignored{"恢复日程"}else{"忽略日程"};

@@ -5,6 +5,8 @@
 //! - `model` / `lyrics` / `smtc` / `icons`：数据、歌词、系统媒体、文件图标
 //! - `native` / `tray`：仅 Windows 的窗口区域、命中穿透与托盘
 
+pub mod display_layout;
+mod mail_privacy;
 pub mod poll_clock;
 pub mod anim;
 pub mod app;
@@ -29,6 +31,7 @@ mod extras;
 mod pet;
 mod bar_layout;
 mod resident_settings;
+mod avoidance;
 mod focus_bar;
 #[cfg(windows)]
 pub mod system;

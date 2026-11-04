@@ -68,6 +68,19 @@ impl DragCapture {
     }
 }
 
+// 图形上下文和原生样式就绪后重新启用逐像素合成；不能只依赖创建 HWND 时的请求。
+fn enable_alpha_composition(hwnd:HWND)->windows::core::Result<()> {
+    use windows::Win32::Graphics::Dwm::{DwmEnableBlurBehindWindow,DWM_BLURBEHIND,DWM_BB_ENABLE,DWM_BB_BLURREGION};
+    unsafe {
+        let region=CreateRectRgn(0,0,-1,-1);
+        if region.0.is_null(){return Err(windows::core::Error::from_win32());}
+        let blur=DWM_BLURBEHIND{dwFlags:DWM_BB_ENABLE|DWM_BB_BLURREGION,fEnable:true.into(),hRgnBlur:region,..Default::default()};
+        let result=DwmEnableBlurBehindWindow(hwnd,&blur);
+        let _=DeleteObject(region);
+        result
+    }
+}
+
 /// 命中区外 `HTTRANSPARENT`（鼠标投给下层窗口），命中区内 `HTCLIENT`。
 unsafe extern "system" fn subclass(
     hwnd: HWND,
@@ -77,6 +90,13 @@ unsafe extern "system" fn subclass(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    if matches!(msg,WM_DWMCOMPOSITIONCHANGED|WM_DISPLAYCHANGE|WM_DWMCOLORIZATIONCOLORCHANGED)
+        || (msg==WM_SHOWWINDOW && wp.0!=0) {
+        // 隐藏创建到首次显示、隐藏后恢复时也要恢复透明；等框架处理完窗口状态再应用。
+        let result=DefSubclassProc(hwnd,msg,wp,lp);
+        let _=enable_alpha_composition(hwnd);
+        return result;
+    }
     // 保留框架的焦点通知；lParam=-1 禁止系统在激活时重画透明窗口的顶边。
     if msg==WM_NCACTIVATE {return DefSubclassProc(hwnd,msg,wp,LPARAM(-1));}
     if msg==WM_NCPAINT {return LRESULT(0);}
@@ -191,6 +211,7 @@ impl Window {
         let hwnd = HWND(handle.hwnd.get() as *mut _);
         let hook = unsafe {
             apply_style(hwnd, false, false);
+            let _=enable_alpha_composition(hwnd);
             let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0);
             SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
@@ -205,9 +226,26 @@ impl Window {
         Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default() })
     }
 
-    pub fn browser_at_top(&mut self)->Option<bool> {
+    /// 使用目标屏幕的物理坐标定位，并在缩放或屏幕连接变化后重新校正。
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds)->bool {
+        unsafe {
+            let Some((x,y))=crate::display_layout::island_origin(bounds,crate::app::WIN_W,scale) else{return false;};
+            let mut current=RECT::default();
+            if GetWindowRect(self.hwnd,&mut current).is_err(){return false;}
+            if (current.left,current.top)!=(x,y) && SetWindowPos(self.hwnd,None,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER).is_err(){return false;}
+            true
+        }
+    }
+
+    pub fn logical_origin(&self,scale:f32)->Option<eframe::egui::Pos2>{
+        let mut r=RECT::default();
+        unsafe { GetWindowRect(self.hwnd,&mut r).ok()?; }
+        Some(eframe::egui::pos2(r.left as f32/scale,r.top as f32/scale))
+    }
+
+    pub fn browser_at_top(&mut self,settings:&crate::model::Settings)->Option<bool> {
         if self.browser_state.1.ready(Duration::from_millis(100)) {
-            self.browser_state=(crate::system::browser_at_top(self.hwnd),PollClock::now());
+            self.browser_state=(crate::system::browser_at_top(self.hwnd,settings),PollClock::now());
         }
         self.browser_state.0
     }

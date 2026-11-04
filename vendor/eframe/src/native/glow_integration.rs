@@ -221,7 +221,8 @@ impl<'app> GlowWinitApp<'app> {
         )?;
         let gl = painter.gl().clone();
 
-        let max_texture_side = painter.max_texture_side();
+        // 字体图集按这个宽度分配；避免桌面驱动的 16K 上限放大稀疏图集及上传缓冲。
+        let max_texture_side = painter.max_texture_side().min(4096);
         glutin.max_texture_side = Some(max_texture_side);
         for viewport in glutin.viewports.values_mut() {
             if let Some(egui_winit) = viewport.egui_winit.as_mut() {
@@ -941,7 +942,9 @@ impl GlutinWindowContext {
             .prefer_hardware_accelerated(hardware_acceleration)
             .with_depth_size(native_options.depth_buffer)
             .with_stencil_size(native_options.stencil_buffer)
-            .with_transparency(native_options.viewport.transparent.unwrap_or(false));
+            // Windows 的逐像素透明由 DWM 和 alpha 缓冲提供，不能以 WGL 颜色键透明筛选格式。
+            .with_alpha_size(8)
+            .with_transparency(native_options.viewport.transparent.unwrap_or(false) && !cfg!(target_os = "windows"));
         // we don't know if multi sampling option is set. so, check if its more than 0.
         let config_template_builder = if native_options.multisampling > 0 {
             config_template_builder.with_multisampling(
@@ -1124,11 +1127,20 @@ impl GlutinWindowContext {
             );
             if window_attributes.transparent()
                 && self.gl_config.supports_transparency() == Some(false)
+                && !cfg!(target_os = "windows")
             {
                 log::error!("Cannot create transparent window: the GL config does not support it");
             }
-            let window =
-                glutin_winit::finalize_window(event_loop, window_attributes, &self.gl_config)?;
+            // Windows 驱动的 WGL 透明标记可能是假阴性，保留显式请求的原生透明属性。
+            // 对齐上游 egui #8423；不改变普通不透明窗口。
+            #[cfg(target_os = "windows")]
+            let window = if window_attributes.transparent() {
+                event_loop.create_window(window_attributes)?
+            } else {
+                glutin_winit::finalize_window(event_loop, window_attributes, &self.gl_config)?
+            };
+            #[cfg(not(target_os = "windows"))]
+            let window = glutin_winit::finalize_window(event_loop, window_attributes, &self.gl_config)?;
             egui_winit::apply_viewport_builder_to_window(
                 &self.egui_ctx,
                 &window,

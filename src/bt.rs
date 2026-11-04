@@ -1,6 +1,6 @@
 //! 经典蓝牙与低功耗蓝牙设备的连接状态和电量。
 
-use std::time::Duration;
+use std::time::{Duration,Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
@@ -53,43 +53,55 @@ impl Device {
     }
 }
 
-/// 启动后台轮询，返回接收端。接收端断开后线程自行退出。
-#[cfg(windows)]
-pub fn spawn() -> std::sync::mpsc::Receiver<Vec<Device>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("daozai-bluetooth".into())
-        .spawn(move || loop {
-            if let Ok(found) = query() {
-                if tx.send(found).is_err() {
-                    return;
-                }
+#[derive(Default)]
+struct Cache {devices:Vec<Device>,battery_at:Option<Instant>}
+impl Cache {
+    fn update(&mut self,mut devices:Vec<Device>,now:Instant,read:impl FnOnce(&[Device])->Result<Vec<(String,u8)>,()>)->Vec<Device>{
+        let changed=devices.len()!=self.devices.len() || devices.iter().any(|d|!self.devices.iter().any(|old|old.id==d.id));
+        for device in &mut devices {device.battery=self.devices.iter().find(|old|old.id==device.id).and_then(|old|old.battery);}
+        if devices.is_empty(){self.battery_at=None;}
+        else if changed || self.battery_at.is_none_or(|at|now.duration_since(at)>=Duration::from_secs(60)) {
+            // 失败同样限频，避免设备驱动异常时每两秒重新枚举整机。
+            self.battery_at=Some(now);
+            if let Ok(levels)=read(&devices){for device in &mut devices {device.battery=levels.iter().find(|(id,_)|id==&device.id).map(|(_,level)|*level);}}
+        }
+        self.devices=devices.clone();devices
+    }
+}
+
+/// 释放服务时唤醒后台线程，停止后续扫描。
+pub struct Service {
+    pub rx: std::sync::mpsc::Receiver<Vec<Device>>,
+    stop: std::sync::mpsc::Sender<()>,
+}
+impl Drop for Service {
+    fn drop(&mut self) {let _=self.stop.send(());}
+}
+
+pub fn spawn() -> Service {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let (stop, stopped)=std::sync::mpsc::channel();
+    std::thread::Builder::new().name("daozai-bluetooth".into()).spawn(move || {
+        #[cfg(windows)]
+        let mut cache=Cache::default();
+        loop {
+            if stopped.try_recv()!=Err(std::sync::mpsc::TryRecvError::Empty) {return;}
+            #[cfg(windows)]
+            if let Ok(found)=query(&mut cache) {
+                if matches!(tx.try_send(found),Err(std::sync::mpsc::TrySendError::Disconnected(_))) {return;}
             }
-            std::thread::sleep(Duration::from_secs(2));
-        })
-        .ok();
-    rx
-}
-
-#[cfg(not(windows))]
-pub fn spawn() -> std::sync::mpsc::Receiver<Vec<Device>> {
-    std::sync::mpsc::channel().1
+            #[cfg(not(windows))]
+            let _=&tx;
+            if stopped.recv_timeout(Duration::from_secs(2))!=Err(std::sync::mpsc::RecvTimeoutError::Timeout) {return;}
+        }
+    }).ok();
+    Service {rx,stop}
 }
 
 #[cfg(windows)]
-fn query() -> Result<Vec<Device>, ()> {
+fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
     use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice};
     use windows::Devices::Enumeration::DeviceInformation;
-    use windows::core::{GUID, PCWSTR};
-    use windows::Win32::Devices::DeviceAndDriverInstallation::*;
-    use windows::Win32::Devices::Properties::DEVPROPKEY;
-    use windows::Win32::Foundation::HWND;
-
-    // DEVPKEY_Bluetooth_Battery {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2
-    const BATTERY: DEVPROPKEY = DEVPROPKEY {
-        fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5),
-        pid: 2,
-    };
     let selectors = [
         (true, BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
         (false, BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
@@ -103,18 +115,39 @@ fn query() -> Result<Vec<Device>, ()> {
             let Ok(name) = info.Name() else { continue };
             let name = name.to_string();
             if name.trim().is_empty() { continue; }
-            let class = if classic {
-                BluetoothDevice::FromIdAsync(&id).ok().and_then(|a| a.get().ok()).and_then(|d| d.ClassOfDevice().ok()).and_then(|c| c.RawValue().ok())
-            } else {
-                BluetoothLEDevice::FromIdAsync(&id).ok().and_then(|a| a.get().ok()).and_then(|d| d.Appearance().ok()).and_then(|c| c.RawValue().ok()).map(u32::from)
-            };
-            let id = id.to_string();
-            let address = id.rsplit('-').next().unwrap_or(&id).replace(':', "").to_ascii_uppercase();
+            let address = id.to_string().rsplit('-').next().unwrap_or_default().replace(':', "").to_ascii_uppercase();
             if devices.iter().any(|d: &Device| d.id == address) { continue; }
-            devices.push(Device { id: address, kind: device_kind(&name, classic, class), name, battery: None });
+            let kind=if let Some(old)=cache.devices.iter().find(|old|old.id==address && old.name==name){old.kind}else{
+                let class=if classic {
+                    BluetoothDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
+                        let class=d.ClassOfDevice().ok().and_then(|c|c.RawValue().ok());let _=d.Close();class
+                    })
+                }else{
+                    BluetoothLEDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
+                        let class=d.Appearance().ok().and_then(|c|c.RawValue().ok()).map(u32::from);let _=d.Close();class
+                    })
+                };
+                device_kind(&name,classic,class)
+            };
+            devices.push(Device { id: address, kind, name, battery: None });
         }
     }
-    if devices.is_empty() { return Ok(devices); }
+    devices.sort_by(|a,b|a.id.cmp(&b.id));
+    Ok(cache.update(devices,Instant::now(),read_batteries))
+}
+
+#[cfg(windows)]
+fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
+    use windows::core::{GUID, PCWSTR};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::*;
+    use windows::Win32::Devices::Properties::DEVPROPKEY;
+    use windows::Win32::Foundation::HWND;
+
+    // DEVPKEY_Bluetooth_Battery {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2
+    const BATTERY: DEVPROPKEY = DEVPROPKEY {
+        fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5),
+        pid: 2,
+    };
     let mut batteries: Vec<(String, u8)> = Vec::new();
     unsafe {
         let set = SetupDiGetClassDevsW(None, PCWSTR::null(), HWND::default(), DIGCF_PRESENT | DIGCF_ALLCLASSES)
@@ -129,6 +162,7 @@ fn query() -> Result<Vec<Device>, ()> {
             }
             let Some(instance) = instance_id(set, &data) else { continue };
             let upper = instance.to_ascii_uppercase();
+            if !devices.iter().any(|device|upper.contains(&device.id)){continue;}
             if let Some(level) = byte_prop(set, &data, &BATTERY).filter(|b| *b <= 100) {
                 batteries.push((upper.clone(), level));
             }
@@ -136,11 +170,7 @@ fn query() -> Result<Vec<Device>, ()> {
         // 每次枚举后释放设备列表句柄。
         let _ = SetupDiDestroyDeviceInfoList(set);
     }
-    for device in &mut devices {
-        device.battery = batteries.iter().find(|(node, _)| node.contains(&device.id)).map(|(_, level)| *level);
-    }
-    devices.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(devices)
+    Ok(devices.iter().filter_map(|device|batteries.iter().find(|(node,_)|node.contains(&device.id)).map(|(_,level)|(device.id.clone(),*level))).collect())
 }
 
 #[cfg(windows)]
@@ -176,6 +206,32 @@ unsafe fn byte_prop(
 mod tests {
     use super::*;
 
+    fn device(id:&str)->Device {Device{id:id.into(),name:id.into(),battery:None,kind:DeviceKind::Mouse}}
+
+    #[test]
+    fn idle_bluetooth_does_not_rescan_all_hardware_every_two_seconds(){
+        let start=std::time::Instant::now();let mut cache=Cache::default();let mut scans=0;
+        for second in (0..360).step_by(2){
+            let found=cache.update(vec![device("AA")],start+Duration::from_secs(second),|_|{scans+=1;Ok(vec![("AA".into(),80)])});
+            assert_eq!(found[0].battery,Some(80));
+        }
+        assert_eq!(scans,6,"六分钟内同一设备的电量扫描应最多每分钟一次");
+    }
+
+    #[test]
+    fn bluetooth_connection_change_refreshes_immediately_and_failed_scans_back_off(){
+        let now=std::time::Instant::now();let mut cache=Cache::default();
+        cache.update(vec![device("AA")],now,|_|Ok(vec![("AA".into(),80)]));
+        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(2),|_|Ok(vec![("AA".into(),79),("BB".into(),60)]));
+        assert_eq!(found[1].battery,Some(60));
+        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(62),|_|Err(()));
+        assert_eq!(found[0].battery,Some(79));
+        cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(64),|_|panic!("失败后不能立即重复扫描"));
+        assert!(cache.update(vec![],now+Duration::from_secs(66),|_|panic!("无设备不能扫描整机")).is_empty());
+        cache.update(vec![device("AA")],now+Duration::from_secs(68),|_|Ok(vec![("AA".into(),78)]));
+        assert_eq!(cache.devices[0].battery,Some(78));
+    }
+
     #[test]
     fn identifies_connected_audio_and_input_devices() {
         assert_eq!(device_kind("OpenMove by Shokz", true, Some(0x240418)), DeviceKind::Bone);
@@ -192,5 +248,16 @@ mod tests {
         assert_eq!(d.summary(), "Headset");
         let d = Device { battery: Some(80), ..d };
         assert_eq!(d.summary(), "Headset · 电量 80%");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    #[test]
+    fn dropping_service_signals_stop_even_without_successful_scans(){
+        let (_tx,rx)=std::sync::mpsc::channel();
+        let (stop,stopped)=std::sync::mpsc::channel();
+        drop(super::Service {rx,stop});
+        assert_eq!(stopped.recv_timeout(std::time::Duration::from_millis(100)),Ok(()));
     }
 }

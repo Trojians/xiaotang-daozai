@@ -8,6 +8,9 @@
 //! 正文只在内存里解析，不落盘、不缓存。
 
 use std::collections::HashMap;
+#[cfg(windows)]
+#[path="mail_fetch.rs"]
+mod fetch;
 
 pub const SERVICE: &str = "Daozai.Mail";
 
@@ -21,6 +24,7 @@ pub enum Provider {
     Exmail,
     ICloud,
     Gmail,
+    Custom,
 }
 
 impl Default for Provider {
@@ -30,13 +34,14 @@ impl Default for Provider {
 }
 
 impl Provider {
-    pub const ALL: [Provider; 6] = [
+    pub const ALL: [Provider; 7] = [
         Provider::Qq,
         Provider::Mail163,
         Provider::Mail126,
         Provider::Exmail,
         Provider::ICloud,
         Provider::Gmail,
+        Provider::Custom,
     ];
 
     pub fn key(self) -> &'static str {
@@ -47,6 +52,7 @@ impl Provider {
             Provider::Exmail => "exmail",
             Provider::ICloud => "icloud",
             Provider::Gmail => "gmail",
+            Provider::Custom => "custom",
         }
     }
 
@@ -58,6 +64,7 @@ impl Provider {
             Provider::Exmail => "腾讯企业邮",
             Provider::ICloud => "iCloud 邮箱",
             Provider::Gmail => "Gmail",
+            Provider::Custom => "自定义 IMAP",
         }
     }
 
@@ -69,6 +76,7 @@ impl Provider {
             Provider::Exmail => "imap.exmail.qq.com",
             Provider::ICloud => "imap.mail.me.com",
             Provider::Gmail => "imap.gmail.com",
+            Provider::Custom => "",
         }
     }
 
@@ -84,6 +92,7 @@ impl Provider {
     /// 设置界面的操作指引。
     pub fn hint(self) -> &'static str {
         match self {
+            Provider::Custom => "向学校或单位管理员确认 IMAP 主机、TLS 端口及用户名。仅支持连接即加密的 IMAP over TLS（通常 993）与 LOGIN/应用专用密码。严格校验证书；不支持明文、STARTTLS、OAuth2 或网页登录/SSO。修改服务器或用户名必须重新输入该目标的授权码。",
             Provider::Qq => "1. 登录 QQ 邮箱网页版，点右上角「设置」→ 左侧「账号与安全」。\n2. 在新页面选「安全设置」，向下找到「POP3/IMAP/SMTP/Exchange/CardDAV 服务」；未开启时先按提示开启。\n3. 点「生成授权码」，完成验证后复制到下方。这里填写授权码，不是 QQ 密码或邮箱独立密码。",
             Provider::Mail163 | Provider::Mail126 => "1. 登录对应的网易邮箱网页版，点顶部「设置」→「POP3/SMTP/IMAP」。\n2. 确认「IMAP/SMTP 服务」已开启；首次开启时按提示完成验证。\n3. 在「授权密码管理」中点「新增授权密码」，完成验证后复制到下方。填写客户端授权码，不是邮箱登录密码。",
             Provider::Exmail => "1. 登录腾讯企业邮网页版，在「设置」→「收发信设置」检查 IMAP/SMTP 服务。\n2. 常见网页版在「设置」→「邮箱绑定」→「客户端专用密码」→「生成新密码」获取密码；启用安全登录后须使用专用密码。\n3. 企业版本和管理员策略可能不同。找不到入口或服务被禁用时，请让企业管理员确认客户端接入方式，不要照搬 QQ 邮箱的路径。",
@@ -100,6 +109,7 @@ impl Provider {
             Provider::Exmail => ("打开腾讯企业邮网页版", "https://exmail.qq.com/"),
             Provider::ICloud => ("打开 Apple 账户", "https://account.apple.com/"),
             Provider::Gmail => ("打开应用专用密码", "https://myaccount.google.com/apppasswords"),
+            Provider::Custom => ("", ""),
         }
     }
 
@@ -110,6 +120,7 @@ impl Provider {
             "exmail" => Provider::Exmail,
             "icloud" => Provider::ICloud,
             "gmail" => Provider::Gmail,
+            "custom" => Provider::Custom,
             _ => Provider::Qq,
         }
     }
@@ -121,8 +132,34 @@ impl Provider {
 pub struct Account {
     pub email: String,
     pub provider: Provider,
+    pub custom: Option<CustomImap>,
     /// 是否监控这个账号（设置里可逐个开关）。
     pub enabled: bool,
+}
+
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct CustomImap { pub host:String, pub port:u16, pub username:String }
+impl Default for CustomImap {fn default()->Self{Self{host:String::new(),port:993,username:String::new()}}}
+impl Account {
+    pub fn endpoint(&self)->Result<(String,u16,String),String>{
+        if self.provider!=Provider::Custom {return Ok((self.provider.host().into(),self.provider.port(),self.email.clone()));}
+        let c=self.custom.as_ref().ok_or("请填写自定义 IMAP 连接配置")?;
+        let host=c.host.trim().to_ascii_lowercase();
+        if host.is_empty() || host.len()>253 || !host.split('.').all(|label|!label.is_empty() && label.len()<=63 && !label.starts_with('-') && !label.ends_with('-') && label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')) {
+            return Err("IMAP 主机必须是域名或 IPv4 地址，不要填写网址、端口、路径或账号".into());
+        }
+        if c.port==0 || c.port==143{return Err("仅支持 IMAP over TLS（通常 993），不支持 143/STARTTLS 或明文连接".into());}
+        let user=if c.username.trim().is_empty(){self.email.trim()}else{c.username.trim()};
+        if user.is_empty() || user.len()>256 || user.chars().any(char::is_control){return Err("IMAP 用户名无效".into());}
+        Ok((host,c.port,user.into()))
+    }
+    /// Custom secrets are bound to the TLS endpoint and exact login identity.
+    pub fn credential_key(&self)->String{
+        if self.provider!=Provider::Custom{return key(self);}
+        let identity=match self.endpoint(){Ok((host,port,user))=>format!("{}\0{host}\0{port}\0{user}",key(self)),Err(_)=>"invalid-custom-endpoint".into()};
+        let digest=ring::digest::digest(&ring::digest::SHA256,identity.as_bytes());
+        format!("custom-{}",digest.as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>())
+    }
 }
 
 pub fn key(account: &Account) -> String {
@@ -154,6 +191,7 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
                 return None;
             }
             Some(Account {
+                custom:a.get("custom").and_then(|c|Some(CustomImap{host:c.get("host")?.as_str()?.into(),port:u16::try_from(c.get("port")?.as_u64()?).ok()?,username:c.get("username").and_then(|u|u.as_str()).unwrap_or("").into()})),
                 provider: Provider::parse(a.get("provider").and_then(|p| p.as_str()).unwrap_or("qq")),
                 enabled: a.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
                 email,
@@ -165,7 +203,7 @@ pub fn decode_accounts(raw: &[u8]) -> Vec<Account> {
 pub fn encode_accounts(items: &[Account]) -> Vec<u8> {
     let list: Vec<_> = items
         .iter()
-        .map(|a| serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled}))
+        .map(|a| serde_json::json!({"email": a.email, "provider": a.provider.key(), "enabled": a.enabled,"custom":a.custom.as_ref().map(|c|serde_json::json!({"host":c.host,"port":c.port,"username":c.username}))}))
         .collect();
     serde_json::to_vec(&list).unwrap_or_default()
 }
@@ -215,8 +253,10 @@ pub struct Item {
     /// 本地时间 `MM-DD HH:MM`
     pub time: String,
     pub code: Option<String>,
+    /// IMAP INTERNALDATE, used only to bound code display age.
+    pub received_unix: Option<i64>,
     /// 完整纯文字正文，保留分段，仅保存在内存中。
-    pub summary: String,
+    pub summary: std::sync::Arc<str>,
     pub links: Vec<Link>,
     /// 会议邀请（来自 .ics / text/calendar），没有就是 `None`。
     pub meeting: Option<Meeting>,
@@ -650,15 +690,16 @@ mod net {
 
     pub fn connect(account: &Account, password: &str) -> Result<imap::Session<Prefixed<Stream>>, String> {
         let tls = TlsConnector::builder()
+            .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
             .build()
             .map_err(|e| format!("TLS 初始化失败：{e}"))?;
-        let host = account.provider.host();
-        let tcp = TcpStream::connect((host, account.provider.port()))
+        let (host,port,username)=account.endpoint()?;
+        let tcp = TcpStream::connect((host.as_str(), port))
             .map_err(|e| format!("无法连接 {host}：{e}"))?;
         let timeout = Some(Duration::from_secs(20));
         let _ = tcp.set_read_timeout(timeout);
         let _ = tcp.set_write_timeout(timeout);
-        let mut stream = tls.connect(host, tcp).map_err(|e| format!("TLS 握手失败：{e}"))?;
+        let mut stream = tls.connect(&host, tcp).map_err(|e| format!("TLS 握手失败：{e}"))?;
 
         // 1) 读问候，直到 "* OK" / "* PREAUTH"
         let mut greeting = Vec::new();
@@ -703,23 +744,16 @@ mod net {
         let mut client = imap::Client::new(Prefixed::new(greeting, stream));
         client.read_greeting().map_err(|e| format!("服务器问候异常：{e}"))?;
         let session = client
-            .login(account.email.clone(), password)
+            .login(username, password)
             .map_err(|(e, _)| login_error(e))?;
         Ok(session)
     }
 
     pub fn login_error(e: imap::Error) -> String {
         match e {
-            imap::Error::No(s) | imap::Error::Bad(s) => {
-                let s = s.trim().to_string();
-                if s.to_ascii_lowercase().contains("unsafe login") {
-                    format!("{s}（网易要求先发 ID 命令）")
-                } else {
-                    format!("{s}（请检查授权码是否失效）")
-                }
-            }
-            imap::Error::Io(io) => format!("网络错误：{io}"),
-            other => format!("登录失败：{other}"),
+            imap::Error::No(_) | imap::Error::Bad(_) => "登录被拒绝，请检查用户名、授权码和管理员的 IMAP/认证策略（不支持 OAuth-only）".into(),
+            imap::Error::Io(_) => "登录时网络连接中断，请重试".into(),
+            _ => "IMAP 登录失败，请核对服务器及认证方式".into(),
         }
     }
 
@@ -774,7 +808,7 @@ mod service {
     }
 
     fn supervisor(cmd_rx: Receiver<Cmd>, ev: Sender<Event>) {
-        let mut workers: HashMap<String, (Arc<AtomicBool>, std::thread::JoinHandle<()>)> = HashMap::new();
+        let mut workers: HashMap<String, (Arc<AtomicBool>, std::thread::JoinHandle<()>,Account)> = HashMap::new();
         let interval = Arc::new(AtomicU64::new(120));
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
@@ -787,11 +821,11 @@ mod service {
                         .collect();
                     let drop: Vec<String> = workers
                         .keys()
-                        .filter(|k| !wanted.contains_key(*k))
+                        .filter(|k| wanted.get(*k)!=workers.get(*k).map(|worker|&worker.2))
                         .cloned()
                         .collect();
                     for k in drop {
-                        if let Some((flag, _)) = workers.remove(&k) {
+                        if let Some((flag, _, _)) = workers.remove(&k) {
                             flag.store(true, Ordering::Relaxed);
                         }
                     }
@@ -803,12 +837,13 @@ mod service {
                         let flag = stop.clone();
                         let ev = ev.clone();
                         let iv = interval.clone();
-                        let name = format!("daozai-mail-{}", account.email);
+                        let name = "daozai-mail".to_string();
+                        let running_account=account.clone();
                         if let Ok(handle) = std::thread::Builder::new()
                             .name(name)
                             .spawn(move || worker(account, flag, iv, ev))
                         {
-                            workers.insert(k, (stop, handle));
+                            workers.insert(k, (stop, handle,running_account));
                         }
                     }
                 }
@@ -827,7 +862,7 @@ mod service {
                 }
             }
         }
-        for (_, (flag, _)) in workers {
+        for (_, (flag, _, _)) in workers {
             flag.store(true, Ordering::Relaxed);
         }
     }
@@ -891,7 +926,7 @@ mod service {
                 account: account.email.clone(),
                 status: Status::Connecting,
             });
-            let password = match secrets::load(&account.email) {
+            let password = match secrets::load(&account.credential_key()) {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = ev.send(Event::Status {
@@ -917,6 +952,7 @@ mod service {
                     continue;
                 }
             };
+            if stop.load(Ordering::Relaxed){let _=session.logout();return;}
             let _ = ev.send(Event::Status {
                 account: account.email.clone(),
                 status: Status::Ready,
@@ -971,35 +1007,6 @@ mod service {
         }
     }
 
-    fn raw_of(fetch: &imap::types::Fetch) -> Option<Vec<u8>> {
-        let header = fetch.header()?;
-        let mut raw = header.to_vec();
-        if let Some(text) = fetch.text() {
-            raw.extend_from_slice(b"\r\n");
-            raw.extend_from_slice(text);
-        }
-        Some(raw)
-    }
-
-    fn item_of(fetch: &imap::types::Fetch, account: &Account) -> Option<Item> {
-        let parsed = parse_message(&raw_of(fetch)?);
-        let subject = if parsed.subject.is_empty() { "（无主题）".to_string() } else { parsed.subject.clone() };
-        Some(Item {
-            account: account.email.clone(),
-            from: if parsed.from.is_empty() { account.email.clone() } else { parsed.from.clone() },
-            subject,
-            time: fetch
-                .internal_date()
-                .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
-                .unwrap_or_default(),
-            code: code_of(&parsed),
-            summary: body_of(&parsed),
-            links: links_of(&parsed),
-            meeting: meeting_of(&parsed.calendar),
-            uid: fetch.uid.unwrap_or(0),
-        })
-    }
-
     /// 首次连接：把最近 20 封读进面板，但不当作新邮件提示。
     fn recent(
         session: &mut imap::Session<net::Prefixed<net::Stream>>,
@@ -1012,16 +1019,8 @@ mod service {
         let max = uids.last().copied().unwrap_or(0);
         let tail: Vec<u32> = uids.iter().rev().take(20).rev().copied().collect();
         for uid in tail {
-            let Ok(fetched) = session.uid_fetch(
-                uid.to_string(),
-                "(UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT])",
-            ) else {
-                continue;
-            };
-            for f in fetched.iter() {
-                if let Some(item) = item_of(f, account) {
-                    let _ = ev.send(Event::Mail { item, new: false });
-                }
+            if let Ok(Some(item))=super::fetch::item(session,uid,account){
+                let _=ev.send(Event::Mail{item,new:false});
             }
         }
         Ok(max)
@@ -1055,7 +1054,7 @@ mod service {
     #[ignore="需要本轮已发送的日历邀请和普通日期邮件"]
     fn qq_live_calendar_mail_probe() {
         let account=load_accounts().into_iter().find(|a|a.provider==Provider::Qq&&a.enabled).unwrap();
-        let password=secrets::load(&account.email).unwrap();
+        let password=secrets::load(&account.credential_key()).unwrap();
         let mut session=net::connect(&account,&password).unwrap();session.examine("INBOX").unwrap();
         let (tx,rx)=std::sync::mpsc::channel();recent(&mut session,&account,&tx).unwrap();
         let items=rx.try_iter().filter_map(|ev|if let Event::Mail{item,..}=ev{Some(item)}else{None}).collect::<Vec<_>>();
@@ -1072,7 +1071,7 @@ mod service {
     fn qq_live_read_only_probe() {
         let accounts=load_accounts();
         let account=accounts.iter().find(|a|a.provider==Provider::Qq&&a.enabled).expect("未找到已启用 QQ 邮箱");
-        let password=secrets::load(&account.email).expect("读取邮箱凭据失败");
+        let password=secrets::load(&account.credential_key()).expect("读取邮箱凭据失败");
         let mut session=net::connect(account,&password).expect("真实登录失败");
         session.examine("INBOX").expect("只读打开收件箱失败");
         println!("idle_supported={}",session.capabilities().expect("读取能力失败").has_str("IDLE"));
@@ -1109,16 +1108,8 @@ mod service {
             uids = uids.split_off(uids.len() - 5);
         }
         for uid in uids {
-            let Ok(fetched) = session.uid_fetch(
-                uid.to_string(),
-                "(UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT])",
-            ) else {
-                return Err(());
-            };
-            for f in fetched.iter() {
-                if let Some(item) = item_of(f, account) {
-                    let _ = ev.send(Event::Mail { item, new: true });
-                }
+            if let Some(item)=super::fetch::item(session,uid,account)? {
+                let _=ev.send(Event::Mail{item,new:true});
             }
             *last = (*last).max(uid);
         }
@@ -1207,8 +1198,8 @@ mod tests {
     #[test]
     fn accounts_roundtrip_without_secrets() {
         let items = vec![
-            Account { email: "a@qq.com".into(), provider: Provider::Qq, enabled: true },
-            Account { email: "b@163.com".into(), provider: Provider::Mail163, enabled: false },
+            Account { custom: None, email: "a@qq.com".into(), provider: Provider::Qq, enabled: true },
+            Account { custom: None, email: "b@163.com".into(), provider: Provider::Mail163, enabled: false },
         ];
         let bytes = encode_accounts(&items);
         assert_eq!(decode_accounts(&bytes), items);
@@ -1219,11 +1210,11 @@ mod tests {
 
     #[test]
     fn provider_presets_cover_six_kinds() {
-        assert_eq!(Provider::ALL.len(), 6);
+        assert_eq!(Provider::ALL.len(), 7);
         assert_eq!(Provider::parse("gmail"), Provider::Gmail);
         assert_eq!(Provider::Gmail.host(), "imap.gmail.com");
         assert_eq!(Provider::Gmail.port(), 993);
-        let gmail=Account{email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true};
+        let gmail=Account {custom: None, email:"demo@gmail.com".into(),provider:Provider::Gmail,enabled:true};
         assert_eq!(decode_accounts(&encode_accounts(&[gmail.clone()])),vec![gmail]);
         assert!(Provider::Mail163.needs_id() && Provider::Mail126.needs_id());
         assert!(!Provider::Qq.needs_id());
@@ -1339,4 +1330,28 @@ END:VCALENDAR\r\n";
         assert_eq!(m.title, "产品评审会");
         assert_eq!(summary_of(&parsed), "会议邀请见附件");
     }
+}
+
+#[cfg(test)]
+mod custom_endpoint_tests {
+ use super::*;
+ fn account()->Account{Account{email:"student@example.edu".into(),provider:Provider::Custom,enabled:true,custom:Some(CustomImap{host:"imap.example.edu".into(),port:993,username:"student-id".into()})}}
+ #[test] fn custom_requires_tls_hostname_and_clean_identity(){
+  let a=account();assert_eq!(a.endpoint().unwrap(),("imap.example.edu".into(),993,"student-id".into()));
+  for host in ["https://imap.example.edu","a/b","a:993","user@host","bad\\host","-bad.example",""]{let mut b=a.clone();b.custom.as_mut().unwrap().host=host.into();assert!(b.endpoint().is_err());}
+  for port in [0,143]{let mut b=a.clone();b.custom.as_mut().unwrap().port=port;assert!(b.endpoint().is_err());}
+  let mut b=a.clone();b.custom.as_mut().unwrap().username="user\r\nLOGIN".into();assert!(b.endpoint().is_err());
+ }
+ #[test] fn credentials_are_bound_to_target_and_login(){
+  let a=account();let k=a.credential_key();
+  let mut b=a.clone();b.custom.as_mut().unwrap().host="other.example.edu".into();assert_ne!(k,b.credential_key());assert_ne!(a,b);
+  let mut b=a.clone();b.custom.as_mut().unwrap().username="other-user".into();assert_ne!(k,b.credential_key());
+  let mut b=a.clone();b.custom.as_mut().unwrap().port=1993;assert_ne!(k,b.credential_key());
+  let mut b=a.clone();b.custom.as_mut().unwrap().host="IMAP.EXAMPLE.EDU".into();assert_eq!(k,b.credential_key());
+  assert!(!k.contains("student"));
+ }
+ #[test] fn custom_config_roundtrips_without_a_secret(){
+  let a=account();let raw=encode_accounts(&[a.clone()]);assert_eq!(decode_accounts(&raw),vec![a]);
+  let text=String::from_utf8(raw).unwrap();assert!(!text.contains("password"));assert!(!text.contains("secret"));
+ }
 }

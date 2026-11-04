@@ -18,7 +18,8 @@ impl crate::app::App {
         });
         ui.add_space(12.0);
         let count=self.quota_bar_indices().len();
-        let layout=preview_layout(&order,count);
+        let mut layout=preview_layout(&order,count);
+        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
         ui.painter().rect_filled(stage,10.0,Color32::from_rgb(19,25,36));
         let scale=((stage.width()-28.0)/layout.width).min(1.0);
@@ -33,7 +34,7 @@ impl crate::app::App {
         let label=|slot|match slot{CLOCK=>"时间",BATTERY=>"电量",QUOTA=>"AI 额度",MUSIC=>"音乐",FOCUS=>"专注",_=>"吉祥物"};
         for (index,&slot) in order.iter().enumerate(){
             let x=cx+layout.x[slot].unwrap();
-            let width=match slot{CLOCK=>44.0,BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>{
+            let width=match slot{CLOCK=>if self.settings.clock_period!=0 {84.0}else{44.0},BATTERY=>20.0,PET=>32.0,MUSIC=>14.0,FOCUS=>crate::focus_bar::WIDTH,_=>{
                 let last=layout.x[MORE].or_else(||layout.x[QUOTA+count.min(3).max(1)-1]).unwrap();
                 last-layout.x[QUOTA].unwrap()+27.0
             }};
@@ -52,7 +53,7 @@ impl crate::app::App {
             let c=card.shifted(dx,0.0).faded(if active||is_dragged{1.0}else{0.38}).ghost();
             match slot{
                 BATTERY=>paint::battery(&c,x,15.0,self.resident_power.0,self.resident_power.1,1.0),
-                CLOCK=>{c.text(x,21.0,&chrono::Local::now().format("%H:%M").to_string(),theme::size::PILL_CLOCK,W::Bold,theme::WHITE,H::Center);},
+                CLOCK=>{let text=self.settings.clock_text(&chrono::Local::now().format("%H:%M:%S").to_string());paint::clock(&c,x-paint::clock_width(&c,&text,theme::size::PILL_CLOCK)/2.0,21.0,&text,theme::size::PILL_CLOCK);},
                 PET=>self.pet.draw(&c,x,self.t),
                 MUSIC=>paint::playback_bars(&c,x,15.0,self.t,self.media.playing,theme::WHITE),
                 FOCUS=>crate::focus_bar::draw(&c,x,15.0,self.t,&self.pomo,self.phase_secs(self.pomo.phase),false),

@@ -478,7 +478,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daozai"
-version = "0.6.49"
+version = "0.6.50"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -488,6 +488,7 @@ dependencies = [
  "flate2",
  "image",
  "imap",
+ "imap-proto",
  "keyring",
  "mailparse",
  "memmap2",
@@ -1297,8 +1298,6 @@ dependencies = [
 [[package]]
 name = "imap-proto"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a6def1d5ac8975d70b3fd101d57953fe3278ef2ee5d7816cba54b1d1dfc22f"
 dependencies = [
  "nom",
 ]

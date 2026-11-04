@@ -221,11 +221,15 @@ fn normalized(text:&str)->String {
     text.chars().flat_map(char::to_lowercase).filter(|c|c.is_alphanumeric()).collect()
 }
 
+pub(super) fn artist_set(artist:&str)->Vec<String>{
+    let mut parts=artist.split(['/', '、', ',', '，', '&', ';', '；']).map(normalized).filter(|s|!s.is_empty()).collect::<Vec<_>>();
+    parts.sort();parts.dedup();parts
+}
+
 fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)->Vec<u64> {
     let title=normalized(track);
     let cleaned=normalized(&clean_title(track));
-    let artist_key=normalized(artist);
-    let artist_parts:Vec<_>=artist.split(['/', '、', ',', '，', '&', ';', '；']).map(normalized).filter(|s|!s.is_empty()).collect();
+    let artist_parts=artist_set(artist);
     let mut matches=Vec::new();
     for item in items {
         let Some(id)=item.get("id").and_then(|v|v.as_u64()) else{continue;};
@@ -234,9 +238,8 @@ fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration
         if !exact && normalized(&clean_title(name))!=cleaned {continue;}
         let artists=item.get("artists").or_else(||item.get("ar")).and_then(|v|v.as_array());
         let Some(artists)=artists else{continue;};
-        if !artists.iter().any(|a|a.get("name").and_then(|v|v.as_str()).is_some_and(|a|{
-            let a=normalized(a);a==artist_key || artist_parts.contains(&a)
-        })){continue;}
+        let names=artists.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("、");
+        if artist_parts.is_empty() || artist_set(&names)!=artist_parts{continue;}
         let candidate_duration=item.get("duration").or_else(||item.get("dt")).and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
         let difference=if duration>0.0 {(candidate_duration-duration).abs()}else{0.0};
         if duration>0.0 && difference>(duration*0.03).max(10.0){continue;}
@@ -285,12 +288,12 @@ fn qq_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)
 fn fetch_qqmusic(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,FetchError> {
     if track.trim().is_empty() || artist.trim().is_empty(){return Err(FetchError::IncompleteMetadata);}
     let query=urlencode(&format!("{track} {artist}"));
-    let result=request_json(&format!("{base}/soso/fcgi-bin/client_search_cp?w={query}&format=json&p=1&n=12"),"https://y.qq.com/")?;
+    let result=request_json_with_retry(&format!("{base}/soso/fcgi-bin/client_search_cp?w={query}&format=json&p=1&n=12"),"https://y.qq.com/",true)?;
     if result["code"].as_i64()!=Some(0){return Err(FetchError::Unavailable("QQ 音乐搜索未成功".into()));}
     let items=result.pointer("/data/song/list").and_then(|v|v.as_array()).ok_or_else(||FetchError::InvalidResponse("QQ 音乐未返回歌曲列表".into()))?;
     let mut plain=None;
     for mid in qq_candidates(items,track,artist,duration) {
-        let result=request_json(&format!("{base}/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1"),"https://y.qq.com/")?;
+        let result=request_json_with_retry(&format!("{base}/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1"),"https://y.qq.com/",true)?;
         if result["code"].as_i64()!=Some(0){return Err(FetchError::Unavailable("QQ 音乐取词未成功".into()));}
         if let Some(raw)=result["lyric"].as_str().filter(|raw|!raw.trim().is_empty()) {
             let lyrics=parse_lrc(raw);
@@ -302,18 +305,28 @@ fn fetch_qqmusic(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,F
 }
 
 fn request_json(url:&str,referer:&str)->Result<serde_json::Value,FetchError> {
-    let response=ureq::get(url)
+    request_json_with_retry(url,referer,false)
+}
+
+fn request_json_with_retry(url:&str,referer:&str,retry:bool)->Result<serde_json::Value,FetchError> {
+    let request=ureq::get(url)
         .set("User-Agent",concat!("Daozai/",env!("CARGO_PKG_VERSION")," (Windows)"))
         .set("Referer",referer)
         .set("Accept","application/json")
-        .timeout(std::time::Duration::from_secs(5))
-        .call().map_err(|e|FetchError::Unavailable(e.to_string()))?;
+        .timeout(std::time::Duration::from_secs(5));
+    let mut result=request.clone().call();
+    // QQ 的偶发连接超时、网关错误只重试一次；拒绝访问和无歌词不重复请求。
+    if retry && result.as_ref().is_err_and(|error|matches!(error,ureq::Error::Transport(_)|ureq::Error::Status(408|500|502|503|504,_))) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        result=request.call();
+    }
+    let response=result.map_err(|e|FetchError::Unavailable(e.to_string()))?;
     let text=response.into_string().map_err(|e|FetchError::InvalidResponse(e.to_string()))?;
     serde_json::from_str(&text).map_err(|e|FetchError::InvalidResponse(e.to_string()))
 }
 
 fn clean_title(track:&str)->String {
-    let suffix=regex::Regex::new(r"(?i)\s*[\(\[（【]\s*(?:movie\s*ver\.?|official(?:\s+music)?\s+(?:video|audio)|lyrics?|lyric\s+video)\s*[\)\]）】]").unwrap();
+    let suffix=regex::Regex::new(r"(?i)\s*[\(\[（【]\s*(?:official(?:\s+music)?\s+(?:video|audio)|lyrics?|lyric\s+video)\s*[\)\]）】]").unwrap();
     suffix.replace_all(track,"").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -326,6 +339,11 @@ fn fetch_from(base:&str,track:&str,artist:&str,duration_secs:f64)->Result<Lyrics
     if !cleaned.is_empty() && cleaned!=track.trim(){titles.push(&cleaned);}
     for title in titles {
         let items=search(base,title,artist)?;
+        let artists=artist_set(artist);
+        let items=items.into_iter().filter(|item|{
+            item.get("trackName").and_then(|v|v.as_str()).is_some_and(|name|normalized(&clean_title(name))==normalized(&clean_title(title)))
+                && !artists.is_empty() && item.get("artistName").and_then(|v|v.as_str()).is_some_and(|name|artist_set(name)==artists)
+        }).collect::<Vec<_>>();
         if let Ok(lyrics)=lyrics_from_items(&items,duration_secs){return Ok(lyrics);}
     }
     Err(FetchError::NotFound)
@@ -406,6 +424,50 @@ mod tests {
         assert!(lyrics.synced && lyrics.lines.len()>10);
         assert!(lyrics.index_at(105.0)>lyrics.index_at(52.0));
         println!("QQ 音乐：同步歌词 {} 行，时间轴正常",lyrics.lines.len());
+    }
+
+    #[test]
+    #[ignore="绕过歌词缓存，验证 QQ 在线搜索及取词"]
+    fn live_qq_uncached_tracks() {
+        for (track,artist,duration) in [("Gotcha","鹭卓",153.0),("不死鸟","霍尊",265.772),("兰香如故","叶炫清",215.0)] {
+            let start=std::time::Instant::now();
+            let result=fetch_qqmusic("https://c.y.qq.com",track,artist,duration);
+            println!("{track}: {:.2}s {:?}",start.elapsed().as_secs_f64(),result.as_ref().map(|lyrics|(lyrics.synced,lyrics.lines.len())));
+            assert!(result.unwrap().synced);
+        }
+    }
+
+    #[test]
+    fn qq_recovers_from_a_transient_search_failure() {
+        let search=serde_json::json!({"code":0,"data":{"song":{"list":[{"songmid":"testMID","songname":"Track","singer":[{"name":"Artist"}],"interval":215}]}}}).to_string();
+        let lyric=serde_json::json!({"code":0,"lyric":"[00:01.00]第一句\n[00:05.00]第二句"}).to_string();
+        let (base,worker)=serve(vec![("502 Bad Gateway",String::new()),("200 OK",search),("200 OK",lyric)]);
+        let result=fetch_qqmusic(&base,"Track","Artist",215.0).unwrap();
+        assert!(result.synced);assert_eq!(result.lines.len(),2);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn qq_timeout_retries_once_and_permanent_errors_stay_errors() {
+        use std::{io::{Read,Write},net::TcpListener,time::Duration};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=format!("http://{}",listener.local_addr().unwrap());
+        let worker=std::thread::spawn(move||{
+            let (mut stalled,_)=listener.accept().unwrap();
+            let mut buffer=[0;4096];stalled.read(&mut buffer).unwrap();
+            // 保持第一条连接不响应，第二次请求才返回，真实覆盖五秒读取超时。
+            let (mut recovered,_)=listener.accept().unwrap();
+            recovered.read(&mut buffer).unwrap();
+            write!(recovered,"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        });
+        let started=std::time::Instant::now();
+        assert!(request_json_with_retry(&url,&url,true).is_ok());
+        assert!(started.elapsed()<Duration::from_secs(8));worker.join().unwrap();
+        for responses in [vec![("503 Service Unavailable",String::new());2],vec![("403 Forbidden",String::new())]] {
+            let (base,worker)=serve(responses);
+            assert!(matches!(request_json_with_retry(&base,&base,true),Err(FetchError::Unavailable(_))));
+            worker.join().unwrap();
+        }
     }
 
     #[test]
@@ -518,6 +580,23 @@ mod tests {
     }
 
     #[test]
+    fn fallback_checks_identity_even_when_wrong_recording_has_exact_duration(){
+        let candidates=serde_json::json!([
+            {"id":1,"name":"合唱","artists":[{"name":"甲"},{"name":"丙"}],"duration":120000},
+            {"id":2,"name":"合唱","artists":[{"name":"乙"},{"name":"甲"}],"duration":120000}
+        ]);
+        assert_eq!(netease_candidates(candidates.as_array().unwrap(),"合唱","甲/乙",120.0),vec![2]);
+        for (name,artist) in [("Other Track","Artist"),("Track (Live)","Artist"),("Track (movie ver.)","Artist"),("Track","Cover Artist"),("Track","")] {
+            let rows=serde_json::json!([{"trackName":name,"artistName":artist,"duration":120,"syncedLyrics":"[00:01.00]不应采用"}]);
+            let (base,worker)=serve(vec![("200 OK",rows.to_string())]);
+            assert_eq!(fetch_from(&base,"Track","Artist",120.0).unwrap_err(),FetchError::NotFound);worker.join().unwrap();
+        }
+        let rows=serde_json::json!([{"trackName":"Track","artistName":"乙、甲","duration":120,"syncedLyrics":"[00:01.00]正确歌词"}]);
+        let (base,worker)=serve(vec![("200 OK",rows.to_string())]);
+        assert_eq!(fetch_from(&base,"Track","甲/乙",120.0).unwrap().lines[0].text,"正确歌词");worker.join().unwrap();
+    }
+
+    #[test]
     fn online_resolver_uses_a_working_source_when_the_other_is_down() {
         let search=serde_json::json!({"code":200,"result":{"songs":[{"id":5,"name":"Track","artists":[{"name":"Artist"}],"duration":120000}]}}).to_string();
         let lyric=serde_json::json!({"code":200,"lrc":{"lyric":"[00:01.00]first\n[00:05.00]second"}}).to_string();
@@ -526,7 +605,7 @@ mod tests {
         assert!(fetch_with_sources(&netease,"http://127.0.0.1:1","Track","Artist",120.0).unwrap().synced);
         worker.join().unwrap();
         let (netease,first)=serve(vec![("503 Service Unavailable",String::new())]);
-        let (lrclib,second)=serve(vec![("200 OK",r#"[{"duration":120,"syncedLyrics":"[00:01.00]first\n[00:05.00]second"}]"#.into())]);
+        let (lrclib,second)=serve(vec![("200 OK",r#"[{"trackName":"Track","artistName":"Artist","duration":120,"syncedLyrics":"[00:01.00]first\n[00:05.00]second"}]"#.into())]);
         assert!(fetch_with_sources(&netease,&lrclib,"Track","Artist",120.0).unwrap().synced);
         first.join().unwrap();second.join().unwrap();
     }
@@ -589,7 +668,7 @@ mod tests {
 
     #[test]
     fn title_fallback_keeps_meaningful_versions() {
-        assert_eq!(clean_title("スパークル (movie ver.)"),"スパークル");
+        assert_eq!(clean_title("スパークル (movie ver.)"),"スパークル (movie ver.)");
         assert_eq!(clean_title("Track (Official Music Video)"),"Track");
         assert_eq!(clean_title("Track (Live)"),"Track (Live)");
     }
@@ -609,7 +688,7 @@ mod tests {
     #[test]
     fn http_search_and_network_errors_are_distinct_from_missing_lyrics() {
         use std::{io::{Read,Write},net::TcpListener};
-        for (status,body,expected) in [("200 OK",r#"[{"duration":120,"syncedLyrics":"[00:01.00]first"}]"#,0),("200 OK","[]",1),("502 Bad Gateway","",2)] {
+        for (status,body,expected) in [("200 OK",r#"[{"trackName":"Track Name","artistName":"Artist","duration":120,"syncedLyrics":"[00:01.00]first"}]"#,0),("200 OK","[]",1),("502 Bad Gateway","",2)] {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();
             let base=format!("http://{}",listener.local_addr().unwrap());
             let worker=std::thread::spawn(move||{

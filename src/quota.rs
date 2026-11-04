@@ -228,8 +228,8 @@ fn http_agent()->ureq::Agent{
     if let Some(proxy)=proxy.and_then(|s|ureq::Proxy::new(s).ok()){builder=builder.proxy(proxy);}
     builder.build()
 }
-#[cfg(not(windows))] fn system_proxy()->Option<String>{None}
-#[cfg(windows)] fn system_proxy()->Option<String>{
+#[cfg(not(windows))] pub(crate) fn system_proxy()->Option<String>{None}
+#[cfg(windows)] pub(crate) fn system_proxy()->Option<String>{
     use windows::{core::w,Win32::System::Registry::{RegGetValueW,HKEY_CURRENT_USER,RRF_RT_REG_DWORD,RRF_RT_REG_SZ}};
     let key=w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");let mut enabled=0u32;let mut size=4u32;
     unsafe{if RegGetValueW(HKEY_CURRENT_USER,key,w!("ProxyEnable"),RRF_RT_REG_DWORD,None,Some((&mut enabled as *mut u32).cast()),Some(&mut size)).is_err() || enabled==0{return None;}}

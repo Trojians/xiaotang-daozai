@@ -97,7 +97,7 @@ fn select(value:&Value,title:&str,artist:&str,duration:f64)->Option<String>{
     let detail=value.pointer("/info/mediaDetail")?;let track=detail.get("playable")?;
     if normalized(track.get("name")?.as_str()?)!=normalized(title){return None;}
     let artists=track.get("artists")?.as_array()?.iter().map(|v|v.get("name")?.as_str()).collect::<Option<Vec<_>>>()?.join(",");
-    if normalized(&artists)!=normalized(artist){return None;}
+    if super::artist_set(&artists).is_empty() || super::artist_set(&artists)!=super::artist_set(artist){return None;}
     let actual=track.get("duration")?.as_f64()?/1000.0;
     if duration>0.0 && (actual-duration).abs()>2.0{return None;}
     let lyric=detail.get("lyrics")?;
@@ -121,6 +121,11 @@ pub fn read(title:&str,artist:&str,duration:f64)->Option<String>{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn duet_order_is_not_a_different_recording(){
+        let v=serde_json::json!({"info":{"mediaDetail":{"playable":{"name":"合唱","artists":[{"name":"甲"},{"name":"乙"}],"duration":120000},"lyrics":{"type":"krc","content":"[1000,500]<0,500,0>词"}}}});
+        assert!(select(&v,"合唱","乙/甲",120.0).is_some());
+        for artist in ["甲","甲/丙",""] {assert!(select(&v,"合唱",artist,120.0).is_none());}
+    }
     #[test] fn record_and_invalid_input(){
         let data=b"\xd4r\x40\x91\xa4name\xa4song";
         assert_eq!(decode(data),Some(serde_json::json!({"name":"song"})));

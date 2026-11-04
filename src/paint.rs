@@ -733,3 +733,21 @@ pub fn file_glyph(c: &Card, kind: FileKind, cx: f32, cy: f32, size: f32) {
 
 const YELLOW_SOFT: Color32 = Color32::from_rgb(255, 214, 92);
 
+
+// 时段文字弱化，数字保持原有字号与字重。
+pub fn clock_width(c:&Card,text:&str,size:f32)->f32 {
+    match text.split_once(' ') {
+        Some((period,digits))=>c.text_w(period,size*0.72,W::Semibold)+4.0+c.text_w(digits,size,W::Bold),
+        None=>c.text_w(text,size,W::Bold),
+    }
+}
+pub fn clock(c:&Card,x:f32,y:f32,text:&str,size:f32) {
+    let (digits,x)=if let Some((period,digits))=text.split_once(' ') {
+        let numbers=c.galley(digits,size,W::Bold,theme::WHITE);
+        let ascent=numbers.rows.first().and_then(|r|r.glyphs.first()).map(|g|g.pos.y).unwrap_or(size*c.s);
+        let center=y+(numbers.mesh_bounds.center().y-ascent)/c.s;
+        c.centered_text(x,center,period,size*0.72,W::Semibold,theme::WHITE,H::Left);
+        (digits,x+c.text_w(period,size*0.72,W::Semibold)+4.0)
+    }else{(text,x)};
+    c.text(x,y,digits,size,W::Bold,theme::WHITE,H::Left);
+}

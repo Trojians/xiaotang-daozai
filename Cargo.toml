@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.49"
+version = "0.6.50"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -26,6 +26,7 @@ record = []
 
 [patch.crates-io]
 imap = { path = "vendor/imap" }
+imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 
 [dependencies]
@@ -55,6 +56,7 @@ memmap2 = "0.9.12"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
   "Win32_System_Com",
   "Win32_System_DataExchange",
@@ -68,6 +70,7 @@ windows = { version = "0.58", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Input_Ime", "Win32_UI_TextServices",
   "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
   "Media_Control",
@@ -87,6 +90,7 @@ windows = { version = "0.58", features = [
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
+imap-proto = "0.10.2"
 native-tls = "0.2"
 keyring = { version = "3", features = ["windows-native"] }
 

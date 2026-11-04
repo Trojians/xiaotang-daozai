@@ -85,16 +85,23 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub display_id: String,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
     pub minimal: bool,
     pub browser_minimal: bool,
+    pub avoid_browsers: bool,
+    pub avoid_apps: Vec<(String,String)>,
     pub visible_pages: [bool; 8],
     pub page_order: [usize; 8],
     pub show_battery: bool,
+    pub clock_12h: bool,
+    pub clock_period: u8,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
+    pub bluetooth_notifications: bool,
     pub read_notifications:bool,
+    pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
     pub lyrics_enabled:bool,
@@ -110,6 +117,7 @@ pub struct Settings {
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_code: bool,
+    pub mail_code_hide_seconds:u32,
     pub mail_interval: u32,
     pub mail_ics: u32,
     pub ignored_mail_events: Vec<String>,
@@ -121,19 +129,35 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, resident_order: Vec::new(), system_hud: true, read_notifications:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
 impl Settings {
+    pub fn clock_text(&self, clock: &str) -> String {
+        use chrono::Timelike;
+        let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
+        let (pm, hour) = time.hour12();
+        let digits=if self.clock_12h {format!("{}:{:02}",hour,time.minute())}else{time.format("%H:%M").to_string()};
+        let period=match self.clock_period {
+            1=>if pm {"下午"}else{"上午"},
+            2=>match time.hour() {0..=5=>"凌晨",6..=10=>"上午",11..=12=>"中午",13..=16=>"下午",17..=18=>"傍晚",_=>"晚上"},
+            _=>return digits,
+        };
+        format!("{period} {digits}")
+    }
+
     pub fn load() -> Self {
         let mut s = Self::default();
         for (k, v) in read_kv(&config_dir().join("settings.txt")) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
+                "display_id" => s.display_id = v,
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
                 "browser_minimal" => s.browser_minimal = v == "1",
+                "avoid_browsers" => s.avoid_browsers = v != "0",
+                "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
                     let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
@@ -145,13 +169,17 @@ impl Settings {
                         }
                     }
                 }
+                "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
+                "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
                 "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
+                "notification_preview" => s.notification_preview=v=="1",
                 "system_hud" => s.system_hud = v != "0",
+                "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
                 "notifications" => s.notifications = v != "0",
                 "sound" => s.sound = v == "1",
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
@@ -166,6 +194,7 @@ impl Settings {
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_code" => s.mail_code = v != "0",
+                "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 60 => 60, 300 => 300, _ => 120 },
                 "ignored_mail_events" => s.ignored_mail_events = serde_json::from_str(&v).unwrap_or_default(),
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
@@ -182,16 +211,23 @@ impl Settings {
         let _ = write_kv(
             &config_dir().join("settings.txt"),
             &[
+                ("display_id".into(),self.display_id.clone()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
                 ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
+                ("avoid_browsers".into(), (self.avoid_browsers as u8).to_string()),
+                ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("clock_period".into(), self.clock_period.to_string()),
+                ("clock_12h".into(), (self.clock_12h as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
+                ("notification_preview".into(),(self.notification_preview as u8).to_string()),
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
+                ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
@@ -206,6 +242,7 @@ impl Settings {
                 ("water_end".into(), self.water_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
+                ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
                 ("mail_interval".into(), self.mail_interval.to_string()),
                 ("mail_ics".into(), self.mail_ics.to_string()),
                 ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),

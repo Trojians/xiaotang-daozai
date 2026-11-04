@@ -21,7 +21,7 @@ use windows::UI::Notifications::Management::{
 };
 use windows::UI::Notifications::{NotificationKinds, UserNotification};
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub volume: Option<(u32, bool)>,
     pub audio_endpoint: Option<String>,
@@ -34,15 +34,15 @@ pub struct Snapshot {
 pub struct Observation {
     pub system: Snapshot,
     pub input: Option<crate::input::State>,
-    pub fullscreen: bool,
+    pub fullscreen: Option<crate::display_layout::Bounds>,
 }
 
 /// 跨进程输入法查询和 COM 状态采样留在后台，只在状态改变时唤醒界面。
 pub fn observe(ctx:eframe::egui::Context,initial:Snapshot,input:Option<crate::input::State>)->Receiver<Observation> {
     let(tx,rx)=mpsc::sync_channel(1);
     std::thread::Builder::new().name("daozai-system".into()).spawn(move||{
-        let mut current=Observation{system:initial,input,fullscreen:false};
-        let mut delivered=current.clone();
+        let mut current=Observation{system:initial,input,fullscreen:None};
+        let mut delivered=None;
         let mut sampled=crate::poll_clock::PollClock::default();
         let mut input_at=sampled;
         loop {
@@ -54,9 +54,9 @@ pub fn observe(ctx:eframe::egui::Context,initial:Snapshot,input:Option<crate::in
             if sampled.ready(std::time::Duration::from_millis(500)){
                 current.system=Snapshot::read();current.fullscreen=fullscreen();sampled=crate::poll_clock::PollClock::now();
             }
-            if current!=delivered {
+            if delivered.as_ref()!=Some(&current) {
                 match tx.try_send(current.clone()) {
-                    Ok(())=>{delivered=current.clone();ctx.request_repaint();},
+                    Ok(())=>{delivered=Some(current.clone());ctx.request_repaint();},
                     Err(mpsc::TrySendError::Disconnected(_))=>return,
                     Err(mpsc::TrySendError::Full(_))=>{},
                 }
@@ -130,8 +130,15 @@ unsafe fn audio_device() -> Result<IMMDevice> {    thread_local! {static INITIAL
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
     });
-    let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    en.GetDefaultAudioEndpoint(eRender, eConsole)
+    // 每个采样线程复用枚举器，但每次仍查询当前默认设备，保留热插拔响应。
+    thread_local! {static ENUMERATOR:std::cell::RefCell<Option<IMMDeviceEnumerator>>=const{std::cell::RefCell::new(None)};}
+    ENUMERATOR.with(|slot| {
+        let mut slot=slot.borrow_mut();
+        if slot.is_none(){*slot=Some(CoCreateInstance(&MMDeviceEnumerator,None,CLSCTX_ALL)?);}
+        let result=slot.as_ref().unwrap().GetDefaultAudioEndpoint(eRender,eConsole);
+        if result.is_err(){*slot=None;}
+        result
+    })
 }
 unsafe fn audio() -> Result<IAudioEndpointVolume> {audio_device()?.Activate(CLSCTX_ALL,None)}
 /// 设置主音量（0..100）；同时解除静音，拖动音量条时立刻能听到。
@@ -171,27 +178,27 @@ pub fn idle_seconds() -> f64 {
         }
     }
 }
-pub fn fullscreen() -> bool {
+pub fn fullscreen() -> Option<crate::display_layout::Bounds> {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
-            return false;
+            return None;
         }
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
-            return false;
+            return None;
         }
         // 桌面与资源管理器桌面窗口不能当成全屏游戏。
         let mut cls = [0u16; 64];
         let n = GetClassNameW(hwnd, &mut cls);
         let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
         if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
-            return false;
+            return None;
         }
         let mut r = RECT::default();
         if GetWindowRect(hwnd, &mut r).is_err() {
-            return false;
+            return None;
         }
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -199,18 +206,19 @@ pub fn fullscreen() -> bool {
         };
         if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool()
         {
-            return false;
+            return None;
         }
-        r.left <= info.rcMonitor.left
+        let covers=r.left <= info.rcMonitor.left
             && r.top <= info.rcMonitor.top
             && r.right >= info.rcMonitor.right
-            && r.bottom >= info.rcMonitor.bottom
+            && r.bottom >= info.rcMonitor.bottom;
+        covers.then_some(crate::display_layout::Bounds {left:info.rcMonitor.left,top:info.rcMonitor.top,right:info.rcMonitor.right,bottom:info.rcMonitor.bottom})
     }
 }
-fn is_browser_process(name:&str)->bool {
+pub(crate) fn is_browser_process(name:&str)->bool {
     ["chrome.exe","msedge.exe","firefox.exe","brave.exe","vivaldi.exe","opera.exe",
         "arc.exe","zen.exe","chromium.exe","librewolf.exe","floorp.exe","waterfox.exe",
-        "duckduckgo.exe","360se.exe","360chrome.exe","qqbrowser.exe","sogouexplorer.exe"]
+        "duckduckgo.exe","360se.exe","360chrome.exe","qqbrowser.exe","sogouexplorer.exe","quark.exe"]
         .iter().any(|browser|name.eq_ignore_ascii_case(browser))
 }
 
@@ -222,7 +230,7 @@ fn browser_overlaps_island(browser:RECT,island:RECT)->bool {
         && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top
 }
 
-pub fn browser_at_top(island:HWND)->Option<bool> {
+pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool> {
     unsafe {
         let foreground=GetForegroundWindow();
         if foreground.0.is_null(){return None;}
@@ -239,11 +247,12 @@ pub fn browser_at_top(island:HWND)->Option<bool> {
         let _=CloseHandle(process);
         if result.is_err(){return Some(false);}
         let path=String::from_utf16_lossy(&path[..length as usize]);
-        Some(std::path::Path::new(&path).file_name().and_then(|name|name.to_str()).is_some_and(is_browser_process))
+        Some(avoidance_matches(&path,settings))
     }
 }
 
 pub enum Incoming {
+    Revoked,
     Status(String),
     Message(String, String, String),
 }
@@ -284,6 +293,7 @@ pub fn connect() -> Result<Receiver<Incoming>> {
                 )
             };
             if request.get()? != UserNotificationListenerAccessStatus::Allowed {
+                let _ = tx.send(Incoming::Revoked);
                 let _ = tx.send(Incoming::Status(
                     "Windows 未授予通知读取权限，可在系统设置中调整。".into(),
                 ));
@@ -294,6 +304,7 @@ pub fn connect() -> Result<Receiver<Incoming>> {
             let mut first = true;
             loop {
                 if listener.GetAccessStatus()? != UserNotificationListenerAccessStatus::Allowed {
+                    let _ = tx.send(Incoming::Revoked);
                     let _ = tx.send(Incoming::Status("通知权限已被关闭".into()));
                     return Ok(());
                 }
@@ -307,7 +318,7 @@ pub fn connect() -> Result<Receiver<Incoming>> {
                     current.insert(id);
                     if !first && !seen.contains(&id) {
                         if let Ok((app, id, body)) = notification_text(&n) {
-                            if app != "岛仔" && !body.is_empty() {
+                            if !body.is_empty() {
                                 if tx.send(Incoming::Message(app, id, body)).is_err() {
                                     return Ok(());
                                 }
@@ -416,10 +427,10 @@ mod tests {
     use super::*;
     #[test]
     fn browser_minimal_recognizes_browsers_without_matching_electron_apps(){
-        for name in ["chrome.exe","MSEDGE.EXE","firefox.exe","brave.exe","zen.exe","QQBrowser.exe"] {
+        for name in ["chrome.exe","MSEDGE.EXE","firefox.exe","brave.exe","zen.exe","QQBrowser.exe","quark.exe","Quark.exe","QUARK.EXE"] {
             assert!(is_browser_process(name),"应识别浏览器 {name}");
         }
-        for name in ["Codex.exe","Code.exe","msedgewebview2.exe","explorer.exe","chrome-helper.exe",""] {
+        for name in ["Codex.exe","Code.exe","msedgewebview2.exe","explorer.exe","chrome-helper.exe","quark_proxy.exe","quark_pwa_launcher.exe","quark_host_client.exe","quark_swap_util.exe","QuarkUpdaterSetup.exe",""] {
             assert!(!is_browser_process(name),"不能将 {name} 当作浏览器");
         }
     }
@@ -486,5 +497,89 @@ mod tests {
                 OleUninitialize();
             }
         }
+    }
+}
+
+fn avoidance_matches(path:&str,settings:&crate::model::Settings)->bool {
+    settings.browser_minimal && (crate::avoidance::contains_app(&settings.avoid_apps,path)
+        || settings.avoid_browsers && std::path::Path::new(path).file_name().and_then(|name|name.to_str()).is_some_and(is_browser_process))
+}
+
+pub(crate) fn avoidance_windows()->std::result::Result<Vec<crate::avoidance::Candidate>,String> {
+    use windows::Win32::Foundation::{BOOL,LPARAM};
+    unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL {
+        if !IsWindowVisible(hwnd).as_bool() || GetWindowLongPtrW(hwnd,GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0!=0 {return BOOL(1);}
+        let mut cloaked=0u32;
+        let _=windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(hwnd,windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,(&mut cloaked as *mut u32).cast(),4);
+        if cloaked!=0{return BOOL(1);}
+        let mut title=[0u16;1024];let len=GetWindowTextW(hwnd,&mut title);
+        if len==0{return BOOL(1);}
+        let mut pid=0;GetWindowThreadProcessId(hwnd,Some(&mut pid));
+        if pid==GetCurrentProcessId(){return BOOL(1);}
+        let Ok(process)=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid)else{return BOOL(1)};
+        let mut path=[0u16;32768];let mut length=path.len() as u32;
+        let result=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,PWSTR(path.as_mut_ptr()),&mut length);
+        let _=CloseHandle(process);
+        if result.is_err(){return BOOL(1);}
+        let path=String::from_utf16_lossy(&path[..length as usize]);
+        let items=&mut *(param.0 as *mut Vec<crate::avoidance::Candidate>);
+        if items.iter().any(|a|crate::avoidance::same_app(&a.path,&path)){return BOOL(1);}
+        let filename=std::path::Path::new(&path).file_name().and_then(|s|s.to_str()).unwrap_or("");
+        let name=executable_description(&path).unwrap_or_else(||filename.trim_end_matches(".exe").to_string());
+        items.push(crate::avoidance::Candidate{browser:is_browser_process(filename),path,name,title:String::from_utf16_lossy(&title[..len as usize])});
+        BOOL(1)
+    }
+    let mut items:Vec<crate::avoidance::Candidate>=Vec::new();
+    unsafe{EnumWindows(Some(visit),LPARAM(&mut items as *mut _ as isize))}.map_err(|_|"无法读取应用列表，请刷新重试".to_string())?;
+    items.sort_by_key(|a|a.name.to_lowercase());
+    Ok(items)
+}
+
+fn executable_description(path:&str)->Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW,GetFileVersionInfoW,VerQueryValueW};
+    let path:Vec<u16>=path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let size=GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()),None);if size==0{return None;}
+        let mut bytes=vec![0u8;size as usize];GetFileVersionInfoW(PCWSTR(path.as_ptr()),0,size,bytes.as_mut_ptr().cast()).ok()?;
+        let mut ptr=std::ptr::null_mut();let mut len=0;
+        if !VerQueryValueW(bytes.as_ptr().cast(),windows::core::w!("\\VarFileInfo\\Translation"),&mut ptr,&mut len).as_bool() || len<4{return None;}
+        let translation=std::slice::from_raw_parts(ptr as *const u16,2);
+        let key:Vec<u16>=format!("\\StringFileInfo\\{:04x}{:04x}\\FileDescription",translation[0],translation[1]).encode_utf16().chain(Some(0)).collect();
+        if !VerQueryValueW(bytes.as_ptr().cast(),PCWSTR(key.as_ptr()),&mut ptr,&mut len).as_bool() || len<=1{return None;}
+        let name=String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16,len as usize)).trim_end_matches('\0').trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+#[cfg(test)]
+mod avoidance_tests {
+    use super::*;
+    #[test]
+    fn avoidance_respects_master_browser_switch_and_custom_app_identity() {
+        let mut settings=crate::model::Settings::default();
+        settings.avoid_apps=vec![(r"D:\Apps\Editor.exe".into(),"编辑器".into())];
+        assert!(!avoidance_matches(r"D:\Apps\Editor.exe",&settings));
+        settings.browser_minimal=true;
+        assert!(avoidance_matches(r"D:\Quark\quark.exe",&settings));
+        assert!(avoidance_matches(r"d:\apps\EDITOR.EXE",&settings));
+        assert!(!avoidance_matches(r"C:\Other\Editor.exe",&settings));
+        settings.avoid_browsers=false;
+        assert!(!avoidance_matches(r"D:\Quark\quark.exe",&settings));
+        assert!(avoidance_matches(r"D:\Apps\Editor.exe",&settings));
+        settings.avoid_apps.clear();
+        assert!(!avoidance_matches(r"D:\Apps\Editor.exe",&settings));
+    }
+    #[test]
+    fn avoidance_window_list_excludes_this_process_and_deduplicates_apps() {
+        let entries=avoidance_windows().unwrap();
+        let current=std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        for (index,app) in entries.iter().enumerate() {
+            assert!(!crate::avoidance::same_app(&app.path,&current));
+            assert!(!app.name.is_empty() && !app.title.is_empty());
+            assert!(!entries[..index].iter().any(|previous|crate::avoidance::same_app(&previous.path,&app.path)));
+        }
+        let notepad=std::path::Path::new(r"C:\Windows\System32\notepad.exe");
+        if notepad.exists(){assert!(executable_description(notepad.to_str().unwrap()).is_some());}
     }
 }

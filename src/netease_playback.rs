@@ -25,8 +25,8 @@ fn track(value:&serde_json::Value)->Option<(NowPlaying,String)>{
     let t=value.get("track").unwrap_or(value);
     let id=song_id(t.get("id")?)?;
     let title=t.get("name")?.as_str()?.trim().to_owned();
-    let artist=t.get("artists")?.as_array()?.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("/");
-    if title.is_empty() || artist.is_empty(){return None;}
+    let artist=t.get("artists").and_then(|a|a.as_array()).map(|a|a.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("/")).unwrap_or_default();
+    if title.is_empty(){return None;}
     let duration=t.get("duration").and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
     if !duration.is_finite() || !(0.0..86400.0).contains(&duration){return None;}
     let cover=t.pointer("/album/picUrl").and_then(|v|v.as_str()).and_then(cover_url).unwrap_or_default();
@@ -76,7 +76,9 @@ impl Playback {
     }
     fn snapshot(&self,now:u64)->Option<NowPlaying>{
         if !self.ready || !self.media.is_music(){return None;}
-        let mut media=self.media.clone();media.position=self.position(now);media.sampled_at=Some(std::time::Instant::now());Some(media)
+        let mut media=self.media.clone();media.position=self.position(now);media.sampled_at=Some(std::time::Instant::now());
+        media.event_time_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+            .map(|utc|(utc.as_millis() as u64).saturating_sub(now.saturating_sub(self.at)));Some(media)
     }
 }
 
@@ -219,6 +221,11 @@ pub(super) fn control(command:super::Transport){
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn incomplete_artist_does_not_discard_a_known_native_song(){
+        let (media,_)=track(&serde_json::json!({"id":123,"name":"待补全的歌曲","duration":120000})).unwrap();
+        assert!(media.artist.is_empty() && media.is_music());assert_eq!(media.song_id,Some(123));
+    }
     #[test]
     fn transport_uses_only_netease_local_commands(){
         use super::super::Transport;

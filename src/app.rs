@@ -36,7 +36,7 @@ pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
-pub const CANVAS_W: f32 = WIN_W + 640.0; // 为右侧通知预留透明画布，原岛仍按 WIN_W 定位。
+pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
 pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
 
@@ -192,6 +192,7 @@ pub(crate) struct LyricsState {
 /// v0.5.5：邮件面板与设置表单的界面状态。正文只在内存里过一次，不落盘。
 #[derive(Default)]
 pub(crate) struct MailState {
+    pub privacy:crate::mail_privacy::Privacy,
     pub accounts: Vec<mail::Account>,
     /// 每个账号的连接状态，键是邮箱小写。
     pub status: HashMap<String, mail::Status>,
@@ -212,6 +213,7 @@ pub(crate) struct MailState {
 #[derive(Default)]
 pub(crate) struct MailForm {
     pub provider: mail::Provider,
+    pub custom: mail::CustomImap,
     pub email: String,
     pub password: String,
     pub show: bool,
@@ -331,6 +333,7 @@ pub struct App {
     pub(crate) shelf_x: HashMap<PathBuf, Spring>,
     pub(crate) shelf_born: HashMap<PathBuf, f64>,
     pub(crate) icons: crate::icons::Cache,
+    pub(crate) avoidance: crate::avoidance::Picker,
     pub(crate) confirm_clear: Option<f64>,
 
     // 饮水
@@ -355,6 +358,7 @@ pub struct App {
 
     // 音乐
     pub(crate) ly: LyricsState,
+    pub(crate) ly_worker: Option<std::thread::JoinHandle<()>>,
     pub(crate) show_lyrics: bool,
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     media_anchor: (String, f64, f64, bool),
@@ -363,6 +367,7 @@ pub struct App {
 
     forced_open_until:f64,
     pub settings_open:bool,
+    pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
     browser_minimal_active:bool,
     pub(crate) settings_focus_requested:bool,
@@ -463,7 +468,7 @@ impl App {
             shelf_first: 0,
             shelf_x: HashMap::new(),
             shelf_born: HashMap::new(),
-            icons: Default::default(),
+            icons: Default::default(), avoidance: Default::default(),
             confirm_clear: None,
             water_ring: Spring::new(0.0, 120.0, 0.9),
             water_ml: 0.0,
@@ -480,12 +485,13 @@ impl App {
             buf: String::new(),
             todo_pop: Spring::new(0.0, 500.0, 0.45),
             ly: LyricsState::default(),
+            ly_worker: None,
             show_lyrics: initial_lyrics,
             island_lyric_layout: None,
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,
@@ -517,9 +523,28 @@ impl App {
         self.toast_below = false;
     }
 
-    pub(crate) fn code_copied(&mut self, code:&str) {
-        self.say(format!("验证码 {code} 已复制"));
+    pub(crate) fn code_copied(&mut self, _code:&str) {
+        self.say("验证码已复制");
         self.toast_below = true;
+    }
+
+    pub(crate) fn mail_code_hidden(&self,item:&mail::Item)->bool {
+        self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
+    }
+    pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
+    pub(crate) fn display_mail(&self,item:&mail::Item)->mail::Item {
+        let mut safe=item.clone();
+        if self.mail_code_hidden(item) {
+            if let Some(code)=&item.code {
+                safe.subject=crate::mail_privacy::mask(&safe.subject,code);
+                safe.from=crate::mail_privacy::mask(&safe.from,code);
+                safe.summary=self.mail.privacy.masked_body(item);
+                safe.links.clear(); // Avoid tooltip/URL/copy leaks while hidden.
+                if let Some(event)=&mut safe.meeting {event.title=crate::mail_privacy::mask(&event.title,code);}
+                safe.code=None;
+            }
+        }
+        safe
     }
 
     /// 收信服务推来的事件；历史邮件静默，新邮件进入通知队列。
@@ -532,14 +557,18 @@ impl App {
             }
             mail::Event::Mail { item, new } => {
                 if !watching(&item.account){return;}
+                self.mail.privacy.observe(&item,new,self.t,chrono::Utc::now().timestamp());
                 self.mail
                     .recent
                     .retain(|m| !(m.account.eq_ignore_ascii_case(&item.account) && m.uid == item.uid));
                 self.mail.recent.insert(0, item);
                 self.mail.recent.truncate(60);
+                self.mail.privacy.retain(&self.mail.recent);
                 if new && self.settings.mail_enabled {
                     let item=&self.mail.recent[0];
-                    self.alert("新邮件",format!("{} · {}",item.from,item.subject),5,false);
+                    let body=format!("{} · {}",item.from,item.subject);
+                    let body=item.code.as_ref().map(|code|crate::mail_privacy::mask(&body,code)).unwrap_or(body);
+                    self.alert("新邮件",body,5,false);
                     self.notification_bell_at = self.t;
                     self.notification_bell_until = self.t + 6.0;
                 }
@@ -733,14 +762,14 @@ impl App {
             self.mail.form.password = "invalid-auth-code".into();
             self.mail.note = "test@qq.com：正在测试连接…".into();
             self.pending.push(Cmd::MailTest(
-                Account { email: "test@qq.com".into(), provider: Provider::Qq, enabled: true },
+                Account { custom: None, email: "test@qq.com".into(), provider: Provider::Qq, enabled: true },
                 "invalid-auth-code".into(),
             ));
             return;
         }
         self.mail.accounts = vec![
-            Account { email: "tang@qq.com".into(), provider: Provider::Qq, enabled: false },
-            Account { email: "hi@icloud.com".into(), provider: Provider::ICloud, enabled: false },
+            Account { custom: None, email: "tang@qq.com".into(), provider: Provider::Qq, enabled: false },
+            Account { custom: None, email: "hi@icloud.com".into(), provider: Provider::ICloud, enabled: false },
         ];
         for a in &self.mail.accounts {
             self.mail.status.insert(a.email.clone(), Status::Ready);
@@ -790,7 +819,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, (from, subject, time, code, summary, meeting))| Item {
-                account: "tang@qq.com".into(),
+                received_unix: None, account: "tang@qq.com".into(),
                 from: (*from).into(),
                 subject: (*subject).into(),
                 time: (*time).into(),
@@ -878,6 +907,13 @@ impl App {
             if let Some(v) = env.volume {
                 self.volume_ui = Some(v);
             }
+        }
+        if !self.settings.bluetooth_notifications {
+            self.bt_shown.clear();
+            self.bt_initialized=false;
+            self.alerts.retain(|a|a.source!=crate::extras::AlertSource::Internal || a.title!="蓝牙设备");
+            if self.notice.as_ref().is_some_and(|a|a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备") {self.notice=None;}
+            return;
         }
         if !env.bt_ready { return; }
         // 只把首次完整扫描作为基线，之后的连接变化都应提示。
@@ -995,7 +1031,7 @@ impl App {
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
             && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
     }
-    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some())}
+    pub(crate) fn compact_notices(&self)->bool {self.island_lyrics_active()&&!self.open&&!self.notice.as_ref().is_some_and(|a|a.meeting.is_some()||self.settings.notification_preview&&matches!(a.source,crate::extras::AlertSource::External(_)))}
 
     /// 换句、分段和展开高亮共用时间调整；正数延后，负数提前。
     pub(crate) fn lyric_position(&self)->f32 {(self.media.position-self.settings.lyric_delay_ms as f64/1000.0)as f32}
@@ -1048,7 +1084,7 @@ impl App {
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
     fn lyric_bar_width(&self)->f32 {LYRIC_BAR_W+if self.pet_enabled(){48.0}else{0.0}+self.lyric_focus_space()}
     fn notice_size(&self,a:&Alert)->(f32,f32) {
-        let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
+        let (width,height)=if a.meeting.is_some(){(360.0,136.0)}else if a.source==crate::extras::AlertSource::Internal && a.title=="蓝牙设备"{(HUD_W,48.0)}else if a.is_hud(){(HUD_W,38.0)}else{(334.0,44.0)};
         (width,height)
     }
     pub fn set_pet(&mut self,enabled:bool) {
@@ -1134,6 +1170,7 @@ impl App {
         self.resident_power=(env.battery,env.charging);
         let mut layout=Layout::new(self.settings.show_battery&&env.battery.is_some(),self.quota_bar_indices().len(),self.media.is_music()&&!bell,self.pomo.running,bell,self.pet_enabled());
         layout.reorder(&self.settings.resident_order);
+        if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
         if self.pet_enabled() {
             if let Some(a)=self.notice.as_ref().filter(|_|!self.compact_notices()&&!self.open){layout.x[bar::PET]=Some(22.0-(self.notice_size(a).0+self.pet_space())/2.0);}
             else if self.island_lyrics_active() {layout.x[bar::PET]=Some(60.0-self.lyric_bar_width()/2.0);}
@@ -1199,7 +1236,7 @@ impl App {
                 let cursor=env.cursor.unwrap()-Vec2::new(cx-PW/2.0,top);
                 let mail_body=self.page==5 && self.mail.open_uid.is_some()
                     && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
-                let mail_list=self.page==5 && self.mail.open_uid.is_none() && self.mail.recent.len()>3 && Rect::from_min_max(Pos2::new(182.0,36.0),Pos2::new(380.0,122.0)).contains(cursor);
+                let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
                 if mail_body || mail_list {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
@@ -1267,7 +1304,7 @@ impl App {
         self.cursor_local = env.cursor.map(|p| base.to_local(p));
 
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
-        let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some());
+        let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::External(_)));
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
         if fading_hud {
             let from=self.resident.target.width;let to=HUD_W+self.pet_space();
@@ -1290,7 +1327,10 @@ impl App {
             if let Some(a)=self.hud_notice.clone() {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
-                crate::extras::notice_badge(&c,18.0,15.0,&a);
+                if matches!(a.source,crate::extras::AlertSource::External(_)) {
+                    paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
+                    c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
+                }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
                 if button.clicked(){self.notice_details=!self.notice_details;}
             }else if self.t<self.notification_bell_until {
@@ -1340,6 +1380,14 @@ impl App {
         };
         if let Some(rect)=notice_shape {region=region.union(rect.expand2(Vec2::new(12.0,8.0)));}
         if let Some(rect)=notice_details {region=region.union(rect.expand(12.0));}
+        // 原生裁剪还需包含悬停提示；只扩大绘制区域，保持桌面点击穿透。
+        ctx.memory(|memory|{
+            for layer in memory.areas().visible_layer_ids() {
+                if layer.order==egui::Order::Tooltip {
+                    if let Some(rect)=memory.area_rect(layer.id){region=region.union(rect.expand(12.0));}
+                }
+            }
+        });
         let transitioning = !self.w.settled(PW)
             || !self.h.settled(self.expanded_height())
             || self.page_e() < 0.7
@@ -1354,6 +1402,7 @@ impl App {
             || self.open && self.page==2 && !self.water_ring.settled(1.0)
             || self.toast.is_some()
             || self.t < self.notification_bell_until && self.t-self.notification_bell_at < 0.95
+            || self.notice.as_ref().is_some_and(|a|matches!(a.source,crate::extras::AlertSource::External(_))&&self.t-a.at<0.95)
             || self.hud_alpha > 0.003 && self.hud_alpha < 0.997
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
@@ -1503,12 +1552,12 @@ impl App {
         let header=base.faded(1.0-lyric_alpha);
         let base=&header;
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
-        let clock = env.clock.get(..5).unwrap_or("--:--").to_string();
+        let clock = self.settings.clock_text(&env.clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
         let date_w = base.text_w(&env.date, size::DATE, W::Regular);
-        let clock_w = base.text_w(&clock, size::CLOCK, W::Bold);
+        let clock_w = paint::clock_width(base,&clock,size::CLOCK);
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
         let gx = local_cx - group / 2.0 + if show_battery {6.0}else{0.0};
@@ -1519,7 +1568,7 @@ impl App {
         let has_music=self.media.is_music();
         let layout=self.resident.current();
         let pb=(local_cx+layout.x[bar::BATTERY].unwrap_or(0.0),15.0);
-        let pcx=local_cx+layout.x[bar::CLOCK].unwrap()-base.text_w(&clock,size::PILL_CLOCK,W::Bold)/2.0;
+        let pcx=local_cx+layout.x[bar::CLOCK].unwrap()-paint::clock_width(base,&clock,size::PILL_CLOCK)/2.0;
 
         if self.effective_minimal() && self.t>=self.notification_bell_until && p < 0.02 { return; }
         // 电池：位置/大小连续插值
@@ -1532,10 +1581,10 @@ impl App {
         let a_pill = (1.0 - smoothstep(0.25, 0.6, m)) * layout.clearance(bar::CLOCK);
         let a_head = smoothstep(0.35, 0.75, m);
         if a_pill > 0.0 {
-            base.faded(a_pill).text(cpos.0, cpos.1, &clock, size::PILL_CLOCK, W::Bold, theme::WHITE, H::Left);
+            paint::clock(&base.faded(a_pill),cpos.0,cpos.1,&clock,size::PILL_CLOCK);
         }
         if a_head > 0.0 {
-            base.faded(a_head).text(cpos.0, cpos.1 - 0.5, &clock, size::CLOCK, W::Bold, theme::WHITE, H::Left);
+            paint::clock(&base.faded(a_head),cpos.0,cpos.1-0.5,&clock,size::CLOCK);
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
@@ -1820,9 +1869,9 @@ impl App {
         }
         let mut np = m.clone();
         if m.playing {
-            let (_, pos, at, _) = &self.media_anchor;
+            let (_, pos, _, _) = &self.media_anchor;
             np.position = if let Some(sampled)=m.sampled_at {m.position+sampled.elapsed().as_secs_f64()}
-                else {pos + (env.t - at).min(3.0)};
+                else {*pos};
             if m.duration>0.0 {np.position=np.position.min(m.duration);}
         }
         if self.media.source != np.source || self.media.song_id != np.song_id { self.ly=LyricsState::default(); }
@@ -1841,6 +1890,8 @@ impl App {
         if np.title.is_empty(){self.ly=LyricsState::default();return;}
         let key = format!("{}|{}|{:.0}", np.title, np.artist, np.duration);
         if key != self.ly.key || self.ly.retry_at.is_some_and(|at|self.t>=at) {
+            // 歌曲信息抖动或快速切歌不能叠加网络线程；旧请求完成后只查询当前歌曲。
+            if self.ly_worker.as_ref().is_some_and(|worker|!worker.is_finished()){return;}
             let native_only=key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou")
                 && self.ly.error==Some(lyrics::FetchError::NotFound);
             let cached=if key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou"){self.ly.lyrics.take()}else{None};
@@ -1860,12 +1911,12 @@ impl App {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 });
             }
-            std::thread::spawn(move || {
+            self.ly_worker=Some(std::thread::spawn(move || {
                 let result=if native_only {
                     lyrics::kugou_cache::read(&title,&artist,dur).map(|lyrics|(lyrics,false)).ok_or(lyrics::FetchError::NotFound)
                 }else{lyrics::fetch_for_display(&source, &title, &artist, dur, song_id, cached)};
                 let _ = tx.send(result);
-            });
+            }));
         }
         if let Some(rx)=&self.ly.native_rx {
             let mut found=None;

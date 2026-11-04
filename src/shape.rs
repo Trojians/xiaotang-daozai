@@ -58,8 +58,28 @@ fn edge_normal(pts: &[Pos2], i: usize) -> Vec2 {
 
 /// 抗锯齿填充。`feather` 是羽化宽度（逻辑点，通常 = 1 / ppp）。
 pub fn fill(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, color: Color32, feather: f32) {
+    let key=([rect.min.x,rect.min.y,rect.max.x,rect.max.y,flare,flare_h,radius,feather].map(f32::to_bits),color);
+    let mesh=painter.ctx().memory_mut(|memory|memory.caches.cache::<FillCache>().get(key));
+    painter.add(egui::Shape::Mesh(mesh));
+}
+
+type FillKey=([u32;8],Color32);
+type FillCache=egui::cache::FrameCache<std::sync::Arc<egui::Mesh>,FillComputer>;
+#[derive(Default)]
+struct FillComputer;
+impl egui::cache::ComputerMut<FillKey,std::sync::Arc<egui::Mesh>> for FillComputer {
+    fn compute(&mut self,(bits,color):FillKey)->std::sync::Arc<egui::Mesh>{
+        let [x0,y0,x1,y1,flare,flare_h,radius,feather]=bits.map(f32::from_bits);
+        std::sync::Arc::new(fill_mesh(Rect::from_min_max(Pos2::new(x0,y0),Pos2::new(x1,y1)),flare,flare_h,radius,color,feather))
+    }
+}
+
+// 仅保留当前帧仍使用的轮廓；尺寸、透明度或 DPI 改变时重新生成，动画不复用旧形状。
+fn fill_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,feather:f32)->egui::Mesh {
     let rows = sections(rect, flare, flare_h, radius);
     let mut mesh = egui::Mesh::default();
+    mesh.vertices.reserve((rows.len()*3-2)*4);
+    mesh.indices.reserve((rows.len()*3-2)*6);
     // 1) 实心梯形条
     for w in rows.windows(2) {
         let (ya, la, ra) = w[0];
@@ -95,7 +115,7 @@ pub fn fill(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radiu
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
     }
-    painter.add(egui::Shape::mesh(mesh));
+    mesh
 }
 
 /// 柔和的落影：多层半透明轮廓叠加，近似高斯模糊（不依赖 GPU 模糊）。
@@ -161,5 +181,35 @@ mod tests {
         assert!(!inside(&pts, Pos2::new(rect.left() - 0.5, 70.0)));
         // 底部圆角外侧是空的
         assert!(!inside(&pts, Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0)));
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    fn frame(ctx:&egui::Context,width:f32,feather:f32)->std::sync::Arc<egui::Mesh>{
+        let out=ctx.run(egui::RawInput::default(),|ctx|{
+            fill(&ctx.layer_painter(egui::LayerId::background()),Rect::from_min_size(Pos2::ZERO,Vec2::new(width,30.0)),5.0,8.0,12.5,Color32::BLACK,feather);
+        });
+        out.shapes.into_iter().find_map(|s|if let egui::Shape::Mesh(m)=s.shape{Some(m)}else{None}).unwrap()
+    }
+    #[test]
+    fn unchanged_outline_reuses_geometry_across_frames(){
+        let ctx=egui::Context::default();let first=frame(&ctx,300.0,1.0);let second=frame(&ctx,300.0,1.0);
+        assert!(std::sync::Arc::ptr_eq(&first,&second),"稳定轮廓不能每帧重新分配网格");
+        let changed=frame(&ctx,320.0,1.0);assert_ne!(first.vertices,changed.vertices);
+        let scaled=frame(&ctx,320.0,0.5);assert_ne!(changed.vertices,scaled.vertices);
+    }
+
+    #[test]
+    fn animated_outlines_do_not_accumulate_old_meshes(){
+        let ctx=egui::Context::default();
+        for i in 0..300 {
+            let mesh=frame(&ctx,300.0+i as f32/10.0,1.0);
+            let expected=fill_mesh(Rect::from_min_size(Pos2::ZERO,Vec2::new(300.0+i as f32/10.0,30.0)),5.0,8.0,12.5,Color32::BLACK,1.0);
+            assert_eq!(mesh.vertices,expected.vertices);assert_eq!(mesh.indices,expected.indices);
+            let count=ctx.memory_mut(|m|egui::cache::CacheTrait::len(m.caches.cache::<FillCache>()));
+            assert!(count<=2,"动画不能累积历史轮廓：{count}");
+        }
     }
 }
