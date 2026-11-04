@@ -1,13 +1,15 @@
-//! 日历：飞书 / 钉钉 CalDAV 与企业微信 Exchange ActiveSync 只读接入。
+//! 日历：飞书 / 钉钉 CalDAV、企业微信 Exchange ActiveSync 与 ICS 订阅链接只读接入。
 //!
 //! `PROPFIND` 找日历（uuid），`REPORT calendar-query` 分别查询提醒窗口与所选月份，
 //! 企业微信使用 FolderSync / Sync；复用 VEVENT 解析与重复日程展开。认证使用 Basic Auth，
 //! 没有 OAuth、没有回调，用户在客户端自己生成账号密码即可。
+//! ICS 订阅直接拉取发布链接，链接本身就是凭据，同样只进凭据管理器。
 //!
 //! 硬约束：只读；凭据只进 Windows 凭据管理器（`keyring`，和邮件同一套库），
 //! 配置文件里只有平台、用户名、日历地址；不落盘正文、不进日志。
 
 mod exchange;
+mod ics;
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -27,16 +29,18 @@ pub enum Provider {
     Feishu,
     DingTalk,
     WeCom,
+    Ics,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom];
+    pub const ALL: [Provider; 4] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom, Provider::Ics];
 
     pub fn key(self) -> &'static str {
         match self {
             Provider::Feishu => "feishu",
             Provider::DingTalk => "dingtalk",
             Provider::WeCom => "wecom",
+            Provider::Ics => "ics",
         }
     }
 
@@ -45,6 +49,7 @@ impl Provider {
             Provider::Feishu => "飞书",
             Provider::DingTalk => "钉钉",
             Provider::WeCom => "企业微信",
+            Provider::Ics => "订阅日历",
         }
     }
 
@@ -54,6 +59,7 @@ impl Provider {
             Provider::Feishu => "https://caldav.feishu.cn/calendars/",
             Provider::DingTalk => "https://calendar.dingtalk.com",
             Provider::WeCom => "https://wecom.work",
+            Provider::Ics => "ICS 订阅链接（只读）",
         }
     }
 
@@ -75,6 +81,11 @@ impl Provider {
                 "右上角「三」→ 日程设置",
                 "同步至其他日历（Exchange）→ 复制完整用户名及生成的密码",
             ],
+            Provider::Ics => [
+                "Outlook 网页版 → 设置 → 日历 → 共享日历",
+                "选要同步的日历，点「发布」，权限选「可查看所有详细信息」",
+                "复制 ICS 链接，粘贴到下面的订阅链接栏",
+            ],
         }
     }
 
@@ -82,6 +93,7 @@ impl Provider {
         match key {
             "dingtalk" => Provider::DingTalk,
             "wecom" => Provider::WeCom,
+            "ics" => Provider::Ics,
             _ => Provider::Feishu,
         }
     }
@@ -341,6 +353,14 @@ pub struct Failure {
 
 impl Failure {
     fn status(provider: Provider, code: u16) -> Self {
+        if provider == Provider::Ics {
+            let message = match code {
+                401 | 403 => "订阅链接无效或已失效，请重新发布并更新链接".to_string(),
+                404 => "订阅链接不对（404），请核对复制的 ICS 链接".to_string(),
+                _ => format!("订阅服务器返回 {code}"),
+            };
+            return Self { status: Some(code), message };
+        }
         let message = match code {
             401 => format!("用户名或密码不对，请回{}重新生成一次", provider.label()),
             403 => "日历服务器拒绝访问（403），请核对同步地址、专用密码及日历授权".to_string(),
@@ -478,6 +498,8 @@ pub fn fetch_month(cfg: &Config, password: &str, month: NaiveDate) -> Result<Fet
 
 fn fetch_range(cfg: &Config, password: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Fetched, Failure> {
     if cfg.provider == Provider::WeCom { return exchange::fetch(cfg, password, lo, hi); }
+    // ICS 订阅没有账号密码：凭据槽里存的就是订阅链接本身。
+    if cfg.provider == Provider::Ics { return ics::fetch(password, lo, hi); }
     let agent = agent();
     let href = match &cfg.href {
         Some(h) => h.clone(),
@@ -696,6 +718,22 @@ fn events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::DateTime
             if let Some((body,_))=part.split_once("END:VEVENT") {blocks.push(body.to_string());}
         }
     }
+    expand_blocks(blocks, lo, hi)
+}
+
+/// 从一份 .ics 订阅文件里取出窗口内的日程：与 CalDAV 共用重复展开与去重逻辑。
+pub fn events_from_ics(text: &str, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Vec<crate::mail::Meeting>, Failure> {
+    let unfolded = text.replace("\r\n", "\n").replace("\n ", "").replace("\n\t", "");
+    let mut blocks = Vec::new();
+    for part in unfolded.split("BEGIN:VEVENT").skip(1) {
+        if let Some((body, _)) = part.split_once("END:VEVENT") { blocks.push(body.to_string()); }
+    }
+    expand_blocks(blocks, lo, hi)
+}
+
+/// 把 VEVENT 文本块展开成窗口内的日程：重复规则展开、单次修改与取消覆盖原实例、
+/// 按 UID + 开始时间去重。
+fn expand_blocks(blocks: Vec<String>, lo: chrono::DateTime<chrono::Utc>, hi: chrono::DateTime<chrono::Utc>) -> Result<Vec<crate::mail::Meeting>, Failure> {
     let field=|body:&str,name:&str|body.lines().find(|line|line.split([';',':']).next()==Some(name)).map(str::to_string);
     let mut overrides=std::collections::HashSet::new();
     for body in &blocks {
@@ -734,6 +772,7 @@ fn events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::DateTime
     events.retain(|m|m.start<hi.timestamp()&&m.end.unwrap_or(m.start+1)>lo.timestamp());
     events.sort_by_key(|m|m.start);let mut seen=std::collections::HashSet::new();events.retain(|m|seen.insert(dedupe_key(m)));Ok(events)
 }
+
 
 // ---------------------------------------------------------------- URL
 

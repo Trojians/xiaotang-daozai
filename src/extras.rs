@@ -1198,13 +1198,14 @@ impl App {
                         });
                         settings_label(ui,"连接账号");
                         settings_card(ui,|ui|{
+                            let is_ics=self.calendar.form.provider==crate::calendar::Provider::Ics;
                             ui.scope(|ui|{
                                 ui.visuals_mut().extreme_bg_color=settings_color(ctx,Color32::from_rgb(25,25,28),Color32::from_rgb(244,246,249));
                                 let input_width=(ui.available_width()-50.0-48.0-2.0*ui.spacing().item_spacing.x).max(100.0);
                                 ui.horizontal(|ui|{
-                                    ui.add_sized([50.0,30.0],egui::Label::new(egui::RichText::new("用户名").size(13.0).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55)))));
+                                    ui.add_sized([50.0,30.0],egui::Label::new(egui::RichText::new(if is_ics{"订阅名称"}else{"用户名"}).size(13.0).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55)))));
                                     let user=ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.calendar.form.username)
-                                        .hint_text(egui::RichText::new("输入用户名或粘贴账号信息").color(settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)))));
+                                        .hint_text(egui::RichText::new(if is_ics{"输入订阅名称，如 Outlook"}else{"输入用户名或粘贴账号信息"}).color(settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)))));
                                     if user.changed(){
                                         let pasted=self.calendar.form.username.clone();
                                         if let Some((u,p))=crate::calendar::parse_paste(&pasted){
@@ -1217,14 +1218,14 @@ impl App {
                                 });
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui|{
-                                    ui.add_sized([50.0,30.0],egui::Label::new(egui::RichText::new("密码").size(13.0).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55)))));
+                                    ui.add_sized([50.0,30.0],egui::Label::new(egui::RichText::new(if is_ics{"订阅链接"}else{"密码"}).size(13.0).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55)))));
                                     ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.calendar.form.password)
-                                        .password(!self.calendar.form.show).hint_text(egui::RichText::new("输入平台生成的密码").color(settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)))));
+                                        .password(!self.calendar.form.show).hint_text(egui::RichText::new(if is_ics{"粘贴发布得到的 ICS 链接"}else{"输入平台生成的密码"}).color(settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)))));
                                     if ui.add_sized([48.0,30.0],egui::Button::new(if self.calendar.form.show{"隐藏"}else{"显示"})).clicked(){self.calendar.form.show=!self.calendar.form.show;}
                                 });
                             });
                             ui.add_space(7.0);
-                            let guide=if self.calendar.form.guide_open{"收起获取方法"}else{"如何获取用户名和密码？"};
+                            let guide=if self.calendar.form.guide_open{"收起获取方法"}else{if is_ics{"如何获取订阅链接？"}else{"如何获取用户名和密码？"}};
                             if ui.link(egui::RichText::new(guide).color(settings_color(ctx,Color32::from_rgb(120,185,245),Color32::from_rgb(26,100,177)))).clicked(){self.calendar.form.guide_open=!self.calendar.form.guide_open;}
                             if self.calendar.form.guide_open{
                                 ui.add_space(4.0);
@@ -1240,8 +1241,8 @@ impl App {
                                 .corner_radius(7.0);
                             if ui.add_enabled_ui(!busy,|ui|ui.add_sized([130.0,32.0],btn)).inner.clicked(){
                                 let user=self.calendar.form.username.trim().to_string();
-                                if user.is_empty(){self.calendar.note="请先填用户名".into();self.calendar.note_error=true;}
-                                else if self.calendar.form.password.is_empty(){self.calendar.note="请先填密码".into();self.calendar.note_error=true;}
+                                if user.is_empty(){self.calendar.note=if is_ics{"请先填订阅名称".to_string()}else{"请先填用户名".to_string()};self.calendar.note_error=true;}
+                                else if self.calendar.form.password.is_empty(){self.calendar.note=if is_ics{"请先填订阅链接".to_string()}else{"请先填密码".to_string()};self.calendar.note_error=true;}
                                 else{
                                     let cfg=crate::calendar::Config{provider:self.calendar.form.provider,username:user,href:None,server:None};
                                     self.calendar.testing=true;
@@ -1252,7 +1253,7 @@ impl App {
                                 }
                             }
                             ui.add_space(5.0);
-                            ui.label(egui::RichText::new("连接成功后保存，密码存储在 Windows 凭据管理器中。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            ui.label(egui::RichText::new(if is_ics{"连接成功后保存，订阅链接存储在 Windows 凭据管理器中，相当于密码，请勿外泄。"}else{"连接成功后保存，密码存储在 Windows 凭据管理器中。"}).size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             if !self.calendar.note.is_empty(){
                                 ui.add_space(5.0);
                                 let color=if self.calendar.note_error{settings_color(ctx,Color32::from_rgb(255,125,125),Color32::from_rgb(184,34,34))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))};

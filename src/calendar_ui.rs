@@ -46,6 +46,7 @@ impl Source<'_> {
         match self {
             Self::Calendar(Some(calendar::Provider::WeCom))=>Color32::from_rgb(105,208,157),
             Self::Calendar(Some(calendar::Provider::DingTalk))=>Color32::from_rgb(77,192,242),
+            Self::Calendar(Some(calendar::Provider::Ics))=>Color32::from_rgb(0,120,215),
             Self::Calendar(_)=>Color32::from_rgb(112,162,255),
             Self::Mail(_)=>Color32::from_rgb(199,168,255),
             Self::Local=>Color32::from_rgb(105,208,157),

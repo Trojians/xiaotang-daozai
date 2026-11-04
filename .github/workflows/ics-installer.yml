@@ -1,0 +1,26 @@
+name: ICS 订阅分支安装包
+on:
+  push:
+    branches: [ics-subscription]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: 打包安装包
+        shell: pwsh
+        run: |
+          $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
+          ./scripts/package.ps1 -NsisCompiler $compiler
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-ics-setup
+          path: dist/
