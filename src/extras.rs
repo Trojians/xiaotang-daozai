@@ -1178,7 +1178,7 @@ impl App {
                                 ui.set_min_width(ui.available_width());
                                 ui.spacing_mut().item_spacing.x=2.0;
                                 ui.horizontal(|ui|{
-                                    let width=((ui.available_width()-4.0)/3.0).max(80.0);
+                                    let width=((ui.available_width()-4.0)/crate::calendar::Provider::ALL.len() as f32).max(80.0);
                                     for p in crate::calendar::Provider::ALL{
                                         let selected=self.calendar.form.provider==p;
                                         let button=egui::Button::new(egui::RichText::new(p.label()).size(13.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(190),Color32::from_gray(65))}))
