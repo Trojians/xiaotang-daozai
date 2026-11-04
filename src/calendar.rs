@@ -468,6 +468,7 @@ fn report_body(provider: Provider, start: &str, end: &str) -> String {
 }
 
 /// 一次拉取的结果。
+#[derive(Debug)]
 pub struct Fetched {
     pub href: String,
     pub events: Vec<crate::mail::Meeting>,
