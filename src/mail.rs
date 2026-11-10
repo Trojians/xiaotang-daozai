@@ -514,6 +514,35 @@ pub fn meetings_of(calendar: &str) -> Vec<Meeting> {
     out
 }
 
+/// Windows 时区名 → IANA 名：Outlook/Exchange 的 ICS 用 Windows 名（如
+/// "China Standard Time"），chrono-tz 只认 IANA 名；不经映射直接 parse 会失败，
+/// 整条事件会被悄悄丢掉。映射不到的返回 None，调用方仍走原 parse 路径。
+fn windows_tz_to_iana(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "China Standard Time" => "Asia/Shanghai",
+        "GMT Standard Time" => "Europe/London",
+        "W. Europe Standard Time" => "Europe/Berlin",
+        "Central European Standard Time" => "Europe/Budapest",
+        "E. Europe Standard Time" => "Europe/Chisinau",
+        "Romance Standard Time" => "Europe/Paris",
+        "Eastern Standard Time" => "America/New_York",
+        "Central Standard Time" => "America/Chicago",
+        "Mountain Standard Time" => "America/Denver",
+        "Pacific Standard Time" => "America/Los_Angeles",
+        "Alaskan Standard Time" => "America/Anchorage",
+        "Hawaiian Standard Time" => "Pacific/Honolulu",
+        "Tokyo Standard Time" => "Asia/Tokyo",
+        "Korea Standard Time" => "Asia/Seoul",
+        "Singapore Standard Time" => "Asia/Singapore",
+        "Taipei Standard Time" => "Asia/Taipei",
+        "Hong Kong Standard Time" => "Asia/Hong_Kong",
+        "India Standard Time" => "Asia/Kolkata",
+        "AUS Eastern Standard Time" => "Australia/Sydney",
+        "New Zealand Standard Time" => "Pacific/Auckland",
+        _ => return None,
+    })
+}
+
 fn event_of(fields: &[(String, String)]) -> Option<Meeting> {
     use chrono::TimeZone;
     let get = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
@@ -528,7 +557,8 @@ fn event_of(fields: &[(String, String)]) -> Option<Meeting> {
             }
             let n = chrono::NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S").ok()?;
             if let Some(tz) = get(&format!("{name}-TZID")) {
-                let zone: chrono_tz::Tz = tz.parse().ok()?;
+                let iana = windows_tz_to_iana(&tz).unwrap_or(tz.as_str());
+                let zone: chrono_tz::Tz = iana.parse().ok()?;
                 zone.from_local_datetime(&n).single()?.with_timezone(&chrono::Local)
             } else {
                 chrono::Local.from_local_datetime(&n).single()?

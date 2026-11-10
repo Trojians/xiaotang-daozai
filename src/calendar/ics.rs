@@ -124,6 +124,22 @@ mod tests {
     }
 
     #[test]
+    fn ics_windows_timezone_name_parses() {
+        // Outlook 的 ICS 用 Windows 时区名 "China Standard Time"；不映射会解析失败丢事件。
+        const CST: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//Test//CN\r\n\
+        BEGIN:VEVENT\r\nUID:honggeng\r\nSUMMARY:弘庚\r\nDTSTART;TZID=China Standard Time:20261110T200000\r\nDTEND;TZID=China Standard Time:20261110T210000\r\n\
+        END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let url = serve_once(CST, "200 OK");
+        let got = fetch(&url, utc(2026, 11, 10, 0, 0), utc(2026, 11, 11, 0, 0)).unwrap();
+        assert_eq!(got.events.len(), 1);
+        let event = &got.events[0];
+        assert_eq!(event.title, "弘庚");
+        // 北京时间 20:00 = UTC 12:00
+        assert_eq!(event.start, utc(2026, 11, 10, 12, 0).timestamp());
+        assert_eq!(event.end, Some(utc(2026, 11, 10, 13, 0).timestamp()));
+    }
+
+    #[test]
     fn ics_http_error_maps_to_status() {
         let url = serve_once("", "404 Not Found");
         let err = fetch(&url, utc(2026, 11, 5, 0, 0), utc(2026, 11, 6, 0, 0)).unwrap_err();

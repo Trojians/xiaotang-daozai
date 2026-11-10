@@ -3,6 +3,7 @@
 ## 未发布
 
 - 新增 ICS 订阅日历：可订阅 Outlook 等平台发布的 ICS 链接（只读），与飞书、钉钉、企业微信日历合并展示；订阅链接只进 Windows 凭据管理器。
+- 修复 ICS 解析 Windows 时区名（China Standard Time 等）：Outlook 订阅不再丢事件。
 
 ## v0.6.50
 
