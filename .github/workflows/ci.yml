@@ -34,6 +34,11 @@ jobs:
         run: |
           $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
           ./scripts/package.ps1 -SkipBuild -NsisCompiler $compiler
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-setup
+          path: dist/
   installer:
     runs-on: windows-latest
     steps:
