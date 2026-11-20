@@ -12,6 +12,7 @@ use crate::lyrics;
 use crate::mail;
 use crate::model;
 use crate::paint::{self, Card, H};
+use crate::push;
 use crate::shape;
 use crate::smtc::{NowPlaying, Transport};
 use crate::theme::{self, size, W};
@@ -230,6 +231,41 @@ impl MailState {
     }
 }
 
+/// 推送订阅的界面状态。push_key 只在表单里暂存，保存后立刻清掉（和日程表单同款做法）。
+#[derive(Default)]
+pub(crate) struct PushState {
+    /// 最近推送，新的在前，最多 100 条（启动时从 push.json 恢复）。
+    pub recent: Vec<push::Message>,
+    /// 设置页里的提示（成功/失败）。
+    pub note: String,
+    /// 凭据管理器里是否已保存 push_key。
+    pub key_saved: bool,
+    /// 轮询线程最近一次失败的原因；连续失败 >= 2 次才在设置页显示。
+    pub error: String,
+    pub failures: u32,
+    pub form: PushForm,
+}
+
+#[derive(Default)]
+pub(crate) struct PushForm {
+    /// 服务器地址（编辑中），点保存才写回设置。
+    pub server: String,
+    /// 正在输入的 push_key（保存后清空，不落盘）。
+    pub key_input: String,
+    pub show_key: bool,
+}
+
+impl PushState {
+    fn load(server: &str) -> Self {
+        Self {
+            recent: crate::push::history::load_messages(),
+            key_saved: crate::push::secrets::load().is_ok(),
+            form: PushForm { server: server.to_string(), ..Default::default() },
+            ..Default::default()
+        }
+    }
+}
+
 /// v0.5.6：日程（CalDAV）的界面状态。密码只在表单里暂存，保存后立刻清掉。
 #[derive(Default)]
 pub(crate) struct CalendarState {
@@ -415,6 +451,8 @@ pub struct App {
     bt_initialized: bool,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
+    /// 推送订阅：最近推送与设置表单。
+    pub(crate) push: PushState,
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
@@ -435,6 +473,7 @@ impl App {
             s.visuals.selection.bg_fill = theme::alpha_blue(0.45);
         });
         let settings = model::Settings::load();
+        let push_server = settings.push_server.clone();
         let (bw, bh) = if settings.minimal { (BAR_W_MIN, BAR_H_MIN) } else { (BAR_W, BAR_H) };
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
@@ -511,6 +550,7 @@ impl App {
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
+            push: PushState::load(&push_server),
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
@@ -587,6 +627,32 @@ impl App {
                 } else {
                     format!("{account} 连接失败")
                 });
+            }
+        }
+    }
+
+    /// 推送服务推来的事件；新消息进历史并弹提醒卡片 + 托盘通知。
+    pub fn push_event(&mut self, ev: push::Event) {
+        match ev {
+            push::Event::Message { msg } => {
+                if !self.settings.push_enabled { return; }
+                self.push.recent.retain(|m| m.id != msg.id);
+                self.push.recent.insert(0, msg.clone());
+                self.push.recent.truncate(100);
+                self.push.failures = 0;
+                self.push.error.clear();
+                let title = if msg.title.is_empty() { "推送".to_string() } else { format!("推送 · {}", msg.title) };
+                let body = if msg.content.is_empty() { msg.title.clone() } else { msg.content.clone() };
+                // page 5 是邮箱页（消息类页面）；system=true 时同时发托盘通知。
+                self.alert(title, body, 5, true);
+                self.notification_bell_at = self.t;
+                self.notification_bell_until = self.t + 6.0;
+            }
+            push::Event::Error(note) => {
+                self.push.failures += 1;
+                if self.push.failures >= 2 {
+                    self.push.error = note;
+                }
             }
         }
     }
