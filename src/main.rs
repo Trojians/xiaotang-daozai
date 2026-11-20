@@ -45,6 +45,9 @@ struct Shell {
     /// v0.5.5：邮件收信服务（工作线程），以及上次同步给它的账号/开关快照。
     mail: daozai::mail::Service,
     mail_sig: (bool, u32, Vec<daozai::mail::Account>),
+    /// 推送订阅轮询服务（工作线程），以及上次同步给它的开关/服务器/间隔快照。
+    push: daozai::push::Service,
+    push_sig: (bool, String, u32),
     /// v0.5.6：日程（CalDAV）服务与上次下发的配置。
     cal: daozai::calendar::Service,
     cal_sig: (Vec<daozai::calendar::Config>, bool),
@@ -112,6 +115,8 @@ impl Shell {
             volume_quiet: PollClock::default(),
             mail: daozai::mail::Service::start(),
             mail_sig: (false, 0, Vec::new()),
+            push: daozai::push::Service::start(),
+            push_sig: (false, String::new(), 0),
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
@@ -255,6 +260,13 @@ impl eframe::App for Shell {
             self.mail_sig=sig;
         }
         while let Some(ev)=self.mail.try_recv(){self.app.mail_event(ev);}
+        // 推送订阅：开关 / 服务器 / 间隔变了就重新对齐轮询线程，再把事件交给界面。
+        let push_sig=(self.app.settings.push_enabled,self.app.settings.push_server.clone(),self.app.settings.push_interval);
+        if push_sig!=self.push_sig{
+            if push_sig.0{self.push.sync(&push_sig.1,push_sig.2);}else{self.push.stop();}
+            self.push_sig=push_sig;
+        }
+        while let Some(ev)=self.push.try_recv(){self.app.push_event(ev);}
         // 日程连接或自动同步开关变化时下发给工作线程。
         // 录制/截图演示用的是假账号，别让真服务去连（会立刻失败、把状态改成红色）。
         #[cfg(feature="record")]

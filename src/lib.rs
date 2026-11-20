@@ -22,6 +22,7 @@ mod mail_reader;
 mod task_picker;
 pub mod model;
 pub mod otp;
+pub mod push;
 pub mod quota;
 mod quota_ui;
 mod pages;

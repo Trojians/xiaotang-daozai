@@ -117,11 +117,15 @@ pub struct Settings {
     /// 用户点开设置或关掉后置 false，不再弹。
     pub calendar_prompt: bool,
     pub calendar_auto_sync: bool,
+    /// 推送订阅：总开关、服务器地址（push_key 存在 Windows 凭据管理器里，不进设置文件）、轮询间隔（秒）。
+    pub push_enabled: bool,
+    pub push_server: String,
+    pub push_interval: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, resident_order: Vec::new(), system_hud: true, read_notifications:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, resident_order: Vec::new(), system_hud: true, read_notifications:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, push_enabled: false, push_server: "https://push.trojians.qzz.io".into(), push_interval: 60 }
     }
 }
 
@@ -171,6 +175,9 @@ impl Settings {
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
+                "push_enabled" => s.push_enabled = v != "0",
+                "push_server" => { if !v.is_empty() { s.push_server = v; } }
+                "push_interval" => s.push_interval = match v.parse::<u32>().unwrap_or(60) { 30 => 30, 300 => 300, _ => 60 },
                 _ => {}
             }
         }
@@ -211,6 +218,9 @@ impl Settings {
                 ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
+                ("push_enabled".into(), (self.push_enabled as u8).to_string()),
+                ("push_server".into(), self.push_server.clone()),
+                ("push_interval".into(), self.push_interval.to_string()),
             ],
         );
     }
