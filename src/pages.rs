@@ -755,6 +755,43 @@ impl App {
         });
     }
 
+    // ================= 推送订阅 =================
+    pub(crate) fn page_push(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
+        if !self.push.key_saved && self.push.recent.is_empty() {
+            c.text(42.0, 60.0, "还没有推送订阅", 13.0, W::Bold, theme::WHITE, H::Left);
+            let hint = c.fit("在设置 → 推送订阅里粘贴 push_key；保存后自动开始接收", 10.5, W::Regular, 344.0);
+            c.text(42.0, 77.0, &hint, 10.5, W::Regular, theme::GRAY, H::Left);
+            let (go, gc) = capsule(c, 42.0, 88.0, 84.0, 26.0, "push-setup", theme::BTN, theme::BTN_HOVER);
+            gc.text(58.0, 105.0, "去设置", size::BODY, W::Regular, theme::WHITE, H::Left);
+            if go.clicked() {
+                self.open_push_settings();
+            }
+            return;
+        }
+        if self.push.recent.is_empty() {
+            c.text(42.0, 60.0, "暂无推送", 13.0, W::Bold, theme::WHITE, H::Left);
+            c.text(42.0, 77.0, "有新推送时会显示在这里", 10.5, W::Regular, theme::GRAY, H::Left);
+            return;
+        }
+        // 每条两行：标题（左）+ 时间（右），正文一行灰字；岛上放得下最新 3 条。
+        let mut y = 44.0;
+        for msg in self.push.recent.iter().take(3) {
+            let title = if msg.title.is_empty() { "推送".to_string() } else { msg.title.clone() };
+            let row = c.hit(15.0, y - 13.0, 389.0, 30.0, ("push", msg.id));
+            let (h, _) = c.hover_t(&row);
+            if h > 0.01 {
+                c.fill(15.0, y - 13.0, 389.0, 30.0, 7.0, Color32::from_white_alpha((12.0 * h) as u8));
+            }
+            row.on_hover_text(format!("{}\n{}\n{}", title, msg.content, msg.time));
+            let time = msg.time.rsplit(' ').next().unwrap_or(&msg.time);
+            c.text(389.0, y, time, 10.5, W::Regular, theme::GRAY, H::Right);
+            c.text(15.0, y, &c.fit(&title, 12.5, W::Semibold, 300.0), 12.5, W::Semibold, theme::WHITE, H::Left);
+            let body = if msg.content.is_empty() { msg.title.clone() } else { msg.content.clone() };
+            c.text(15.0, y + 15.0, &c.fit(&body, 10.5, W::Regular, 374.0), 10.5, W::Regular, theme::GRAY, H::Left);
+            y += 30.0;
+        }
+    }
+
     /// 岛内邮件详情可滚动，也可以进入独立窗口阅读全文。
     pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
         let hidden=self.mail_code_hidden(raw);

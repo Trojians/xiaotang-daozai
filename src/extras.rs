@@ -370,7 +370,7 @@ impl App {
             }else{
                 let label=if is_focus{"开始"}else if is_power{"知道了"}else{"查看"};
                 if notice_button(&nc,257.0,12.0,60.0,label,"notice-action"){
-                    self.notice=None;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6{
+                    self.notice=None;if is_power{return;}if is_focus{self.pomo.running=true;}else if a.page<6 || a.page==8{
                         self.show_page(a.page);
                         if a.page==4 {
                             if let Some(index)=self.todos.items.iter().position(|task|task.text==a.body && task.done_on.is_none()){
@@ -537,9 +537,9 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "待办与置物"];
         for (tab, expected) in groups.iter().enumerate() {
-            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
+            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,tabs)| tabs.contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
             assert_eq!(matches[0].0, *expected);
         }
@@ -858,9 +858,9 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
         }).response
     });
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
-    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
+const SETTINGS_GROUPS: [(&str, &[usize]); 8] = [
+    ("常规", &[0]), ("页面管理", &[10]), ("音乐与歌词", &[1]), ("专注与饮水", &[2, 3]),
+    ("待办与置物", &[4, 5, 12]), ("通知、邮箱与日程", &[6, 7, 8]), ("AI 额度", &[11]), ("关于", &[9]),
 ];
 
 impl App {
@@ -892,15 +892,15 @@ impl App {
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                 ui.add_space(7.0);
-                for (name,start,end) in SETTINGS_GROUPS {
-                    if start==9 {ui.add_space((ui.available_height()-38.0).max(0.0));}
-                    let selected=(start..=end).contains(&self.settings_tab);
+                for (name, tabs) in SETTINGS_GROUPS {
+                    if name == "关于" {ui.add_space((ui.available_height()-38.0).max(0.0));}
+                    let selected=tabs.contains(&self.settings_tab);
                     let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),36.0),egui::Sense::click());
-                    if response.clicked() && !selected{self.settings_tab=start;}
+                    if response.clicked() && !selected{self.settings_tab=tabs[0];}
                     if selected || response.hovered(){
                         ui.painter().rect_filled(rect,7.0,if selected{settings_color(ctx,Color32::from_rgb(43,43,46),Color32::from_rgb(214,221,232))}else{settings_color(ctx,Color32::from_rgb(30,30,33),Color32::from_rgb(225,230,238))});
                     }
-                    let icon=match start {
+                    let icon=match tabs[0] {
                         0=>egui::include_image!("../assets/settings-icons/system/general.svg"),
                         11=>egui::include_image!("../assets/settings-icons/system/quota.svg"),
                         10=>egui::include_image!("../assets/settings-icons/system/pages.svg"),
@@ -928,15 +928,15 @@ impl App {
                 ui.visuals_mut().widgets.hovered.corner_radius=egui::CornerRadius::same(6);
                 ui.visuals_mut().widgets.active.corner_radius=egui::CornerRadius::same(6);
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
-                if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
-                    if start!=end {
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","推送订阅"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                if let Some((_,tabs))=SETTINGS_GROUPS.iter().find(|(_,tabs)|tabs.contains(&self.settings_tab)) {
+                    if tabs.len()>1 {
                         ui.add_space(7.0);
                         egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(33,33,36),Color32::from_rgb(232,235,240))).corner_radius(8.0).inner_margin(3).show(ui,|ui|{
                             ui.spacing_mut().item_spacing.x=2.0;
                             ui.horizontal(|ui|{
-                                for index in *start..=*end {
+                                for index in tabs.iter().copied() {
                                     let selected=self.settings_tab==index;
                                     let button=egui::Button::new(egui::RichText::new(titles[index]).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))}))
                                         .fill(if selected{settings_color(ctx,Color32::from_rgb(70,70,74),Color32::from_rgb(205,215,229))}else{Color32::TRANSPARENT})
@@ -951,6 +951,70 @@ impl App {
                 egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false]).show(ui,|ui|{
                     match self.settings_tab {
                     11=>self.quota_settings(ui),
+                    12=>{
+                        settings_label(ui,"推送订阅");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"推送订阅","收到推送时在岛上显示提醒卡片并弹托盘通知",&mut self.settings.push_enabled);
+                            ui.separator();
+                            ui.horizontal(|ui|{
+                                ui.add_sized([64.0,30.0],egui::Label::new(egui::RichText::new("服务器").size(13.0)));
+                                let input_width=(ui.available_width()-64.0-2.0*ui.spacing().item_spacing.x).max(100.0);
+                                ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.push.form.server).hint_text("https://push.trojians.qzz.io"));
+                            });
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui|{
+                                ui.add_sized([64.0,30.0],egui::Label::new(egui::RichText::new("push_key").size(13.0)));
+                                let input_width=(ui.available_width()-64.0-2.0*ui.spacing().item_spacing.x).max(100.0);
+                                ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.push.form.key_input).password(!self.push.form.show_key).hint_text("粘贴 push_key，保存后存入系统凭据管理器"));
+                            });
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui|{
+                                if ui.add_sized([66.0,30.0],egui::Button::new("保存")).clicked(){
+                                    let server=self.push.form.server.trim().to_string();
+                                    if !server.is_empty(){self.settings.push_server=server;}
+                                    let key=self.push.form.key_input.trim().to_string();
+                                    if key.is_empty() && !self.push.key_saved {
+                                        self.push.note="push_key 不能为空".into();
+                                    } else if !key.is_empty() {
+                                        match crate::push::secrets::save(&key){
+                                            Ok(())=>{self.push.form.key_input.clear();self.push.key_saved=true;self.push.note="已保存：服务器地址与 push_key".into();}
+                                            Err(e)=>self.push.note=e,
+                                        }
+                                    } else {
+                                        self.push.note="已保存：服务器地址".into();
+                                    }
+                                }
+                                if ui.add_sized([66.0,30.0],egui::Button::new("删除")).clicked(){
+                                    crate::push::secrets::delete();
+                                    self.push.key_saved=false;
+                                    self.push.note="push_key 已删除".into();
+                                }
+                                ui.checkbox(&mut self.push.form.show_key,"显示");
+                            });
+                            ui.add_space(3.0);
+                            ui.label(egui::RichText::new(if self.push.key_saved{"push_key：已保存"}else{"push_key：未保存"}).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            if !self.push.error.is_empty(){
+                                ui.label(egui::RichText::new(&self.push.error).size(12.0).color(Color32::from_rgb(220,80,80)));
+                            }
+                            if !self.push.note.is_empty(){
+                                ui.label(egui::RichText::new(&self.push.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            }
+                            ui.separator();
+                            setting_choices(ui,"检查间隔",&mut self.settings.push_interval,[30,60,300],"秒");
+                            ui.label(egui::RichText::new("每隔一段时间向服务器问一次有没有新推送。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                            ui.separator();
+                            ui.horizontal(|ui|{
+                                ui.label(egui::RichText::new(format!("历史记录：{} 条",self.push.recent.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                    if ui.add_sized([90.0,28.0],egui::Button::new("清空历史")).clicked(){
+                                        self.push.recent.clear();
+                                        crate::push::history::clear();
+                                        self.push.note="历史已清空".into();
+                                    }
+                                });
+                            });
+                        });
+                    }
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                         settings_label(ui,"常驻排列");
@@ -963,7 +1027,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","推送消息历史与提醒"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1132,68 +1196,6 @@ impl App {
                             ui.label(egui::RichText::new("在待办页添加、编辑任务并设置提醒时间。").size(13.0));
                             ui.add_space(5.0);
                             if ui.add_sized([120.0,32.0],egui::Button::new("打开待办页")).clicked(){self.settings_open=false;self.show_page(4);}
-                        });
-                        settings_label(ui,"推送订阅");
-                        settings_card(ui,|ui|{
-                            setting_row(ui,"推送订阅","收到推送时在岛上显示提醒卡片并弹托盘通知",&mut self.settings.push_enabled);
-                            ui.separator();
-                            ui.horizontal(|ui|{
-                                ui.add_sized([64.0,30.0],egui::Label::new(egui::RichText::new("服务器").size(13.0)));
-                                let input_width=(ui.available_width()-64.0-2.0*ui.spacing().item_spacing.x).max(100.0);
-                                ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.push.form.server).hint_text("https://push.trojians.qzz.io"));
-                            });
-                            ui.add_space(5.0);
-                            ui.horizontal(|ui|{
-                                ui.add_sized([64.0,30.0],egui::Label::new(egui::RichText::new("push_key").size(13.0)));
-                                let input_width=(ui.available_width()-64.0-2.0*ui.spacing().item_spacing.x).max(100.0);
-                                ui.add_sized([input_width,30.0],egui::TextEdit::singleline(&mut self.push.form.key_input).password(!self.push.form.show_key).hint_text("粘贴 push_key，保存后存入系统凭据管理器"));
-                            });
-                            ui.add_space(5.0);
-                            ui.horizontal(|ui|{
-                                if ui.add_sized([66.0,30.0],egui::Button::new("保存")).clicked(){
-                                    let server=self.push.form.server.trim().to_string();
-                                    if !server.is_empty(){self.settings.push_server=server;}
-                                    let key=self.push.form.key_input.trim().to_string();
-                                    if key.is_empty() && !self.push.key_saved {
-                                        self.push.note="push_key 不能为空".into();
-                                    } else if !key.is_empty() {
-                                        match crate::push::secrets::save(&key){
-                                            Ok(())=>{self.push.form.key_input.clear();self.push.key_saved=true;self.push.note="已保存：服务器地址与 push_key".into();}
-                                            Err(e)=>self.push.note=e,
-                                        }
-                                    } else {
-                                        self.push.note="已保存：服务器地址".into();
-                                    }
-                                }
-                                if ui.add_sized([66.0,30.0],egui::Button::new("删除")).clicked(){
-                                    crate::push::secrets::delete();
-                                    self.push.key_saved=false;
-                                    self.push.note="push_key 已删除".into();
-                                }
-                                ui.checkbox(&mut self.push.form.show_key,"显示");
-                            });
-                            ui.add_space(3.0);
-                            ui.label(egui::RichText::new(if self.push.key_saved{"push_key：已保存"}else{"push_key：未保存"}).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            if !self.push.error.is_empty(){
-                                ui.label(egui::RichText::new(&self.push.error).size(12.0).color(Color32::from_rgb(220,80,80)));
-                            }
-                            if !self.push.note.is_empty(){
-                                ui.label(egui::RichText::new(&self.push.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            }
-                            ui.separator();
-                            setting_choices(ui,"检查间隔",&mut self.settings.push_interval,[30,60,300],"秒");
-                            ui.label(egui::RichText::new("每隔一段时间向服务器问一次有没有新推送。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
-                            ui.separator();
-                            ui.horizontal(|ui|{
-                                ui.label(egui::RichText::new(format!("历史记录：{} 条",self.push.recent.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                    if ui.add_sized([90.0,28.0],egui::Button::new("清空历史")).clicked(){
-                                        self.push.recent.clear();
-                                        crate::push::history::clear();
-                                        self.push.note="历史已清空".into();
-                                    }
-                                });
-                            });
                         });
                     }
                     5=>{
